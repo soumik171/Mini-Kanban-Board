@@ -1,0 +1,35 @@
+# VCS
+.git
+.gitignore
+
+# Local tooling & planning (never part of an image)
+.freebuff
+AGENTS.md
+scripts
+IMPLEMENTATION_PLAN.md
+IMPLEMENTATION_PLAN.docx
+~$*.docx
+
+# The assessment brief
+Webbriks_Technical_Assessment.pdf
+
+# Dependencies & build output
+node_modules
+**/node_modules
+.next
+dist
+build
+coverage
+*.tsbuildinfo
+
+# Secrets & local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs & OS noise
+*.log
+.DS_Store
+Thumbs.db
