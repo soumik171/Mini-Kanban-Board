@@ -3,6 +3,7 @@ import express from 'express';
 
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
 import { authRouter } from './routes/auth.js';
+import { boardsRouter } from './routes/boards.js';
 
 export function buildApp(): express.Express {
   const app = express();
@@ -16,6 +17,7 @@ export function buildApp(): express.Express {
   });
 
   app.use('/api/auth', authRouter);
+  app.use('/api/boards', boardsRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
