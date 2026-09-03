@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum AuditAction {
+  BOARD_CREATED
+  BOARD_UPDATED
+  BOARD_DELETED
+  MEMBER_ADDED
+  MEMBER_ROLE_CHANGED
+  MEMBER_REMOVED
+  COLUMN_CREATED
+  COLUMN_UPDATED
+  COLUMN_DELETED
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_MOVED
+  TASK_DELETED
+  COMMENT_ADDED
+}
+
+model User {
+  id           String        @id @default(cuid())
+  email        String        @unique
+  name         String
+  passwordHash String
+  boards       Board[]       @relation("OwnedBoards")
+  memberships  BoardMember[]
+  tasks        Task[] // assigned tasks
+  comments     Comment[]
+  auditEvents  AuditEvent[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model Board {
+  id          String        @id @default(cuid())
+  title       String
+  description String?
+  ownerId     String
+  owner       User          @relation("OwnedBoards", fields: [ownerId], references: [id])
+  members     BoardMember[]
+  columns     Column[]
+  auditEvents AuditEvent[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+model BoardMember {
+  id        String   @id @default(cuid())
+  boardId   String
+  board     Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @default(VIEWER)
+  createdAt DateTime @default(now())
+
+  @@unique([boardId, userId])
+}
+
+model Column {
+  id        String   @id @default(cuid())
+  boardId   String
+  board     Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  title     String
+  position  Int
+  tasks     Task[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([boardId, position])
+}
+
+model Task {
+  id          String    @id @default(cuid())
+  columnId    String
+  column      Column    @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  position    Float // fractional ordering key
+  priority    Priority  @default(MEDIUM)
+  dueDate     DateTime?
+  labels      String[] // simple tag list for 4-day scope
+  assigneeId  String?
+  assignee    User?     @relation(fields: [assigneeId], references: [id])
+  comments    Comment[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([columnId, position])
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  content   String
+  createdAt DateTime @default(now())
+}
+
+model AuditEvent {
+  id         String     @id @default(cuid())
+  boardId    String
+  board      Board      @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  actorId    String
+  actor      User       @relation(fields: [actorId], references: [id])
+  action     AuditAction
+  entityType String // "task" | "column" | "board" | "member" | "comment"
+  entityId   String?
+  metadata   Json? // e.g. { fromColumn, toColumn, oldPosition, newPosition }
+  createdAt  DateTime   @default(now())
+
+  @@index([boardId, createdAt(sort: Desc)])
+}
