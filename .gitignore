@@ -6,6 +6,10 @@
 /IMPLEMENTATION_PLAN.md
 /IMPLEMENTATION_PLAN.docx
 
+# Internal API reference / terminal cheatsheet (team-private, never part of the submission)
+/API_REFERENCE.md
+/API_REFERENCE.docx
+
 # Office lock / temp files (left behind when documents are open in Word, etc.)
 ~$*
 
