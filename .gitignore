@@ -1,0 +1,86 @@
+# ============================================================
+# Internal / planning files — NEVER commit (team-private only)
+# ============================================================
+
+# Project plan documents (source of truth for the team, not part of the submission)
+/IMPLEMENTATION_PLAN.md
+/IMPLEMENTATION_PLAN.docx
+
+# Office lock / temp files (left behind when documents are open in Word, etc.)
+~$*
+
+# Local agent skill and rules — tooling, not part of the product
+/.freebuff/
+/AGENTS.md
+
+# Docx generator helper script
+/scripts/make_docx.py
+
+# Original assessment brief (excluded by default; delete this line to include it in the repo)
+/Webbriks_Technical_Assessment.pdf
+
+# ============================================================
+# Secrets & credentials — never commit these
+# ============================================================
+
+# Environment files (matches nested ones too, e.g. backend/.env, frontend/.env.local).
+# Only .env.example templates are allowed in the repo.
+.env
+.env.*
+!.env.example
+
+# Package-manager config can embed registry auth tokens
+.npmrc
+.yarnrc.yml
+
+# Private keys & certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+
+# Vercel local state can contain auth tokens
+.vercel/
+
+# ============================================================
+# Node / Next.js
+# ============================================================
+node_modules/
+.next/
+out/
+dist/
+build/
+coverage/
+
+# ============================================================
+# Logs (can contain stack traces / request data)
+# ============================================================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ============================================================
+# Caches
+# ============================================================
+.eslintcache
+.stylelintcache
+.parcel-cache/
+.turbo/
+.cache/
+
+# ============================================================
+# OS / editor junk
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+*.tsbuildinfo
