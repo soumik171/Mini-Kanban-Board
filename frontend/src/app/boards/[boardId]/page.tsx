@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState, type DragEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 
 import { AppHeader } from "@/components/app-header";
 import { RequireAuth } from "@/components/require-auth";
@@ -82,6 +82,14 @@ function BoardContent() {
     void load();
   }, [load]);
 
+  // Auto-dismiss transient action errors (e.g. a rejected move) after a few
+  // seconds so a stale banner never lingers over a healthy board.
+  useEffect(() => {
+    if (!actionError) return;
+    const timer = setTimeout(() => setActionError(null), 5000);
+    return () => clearTimeout(timer);
+  }, [actionError]);
+
   if (loading) {
     return (
       <main className="flex flex-1 items-center justify-center text-sm text-slate-500">
@@ -152,8 +160,8 @@ function BoardContent() {
           boardId={boardId ?? ""}
           task={selectedTask}
           canEdit={canEdit}
-          onSaved={(task) => {
-            setSelectedTask(task);
+          onSaved={() => {
+            setSelectedTask(null);
             void load();
           }}
           onDeleted={() => {
@@ -193,6 +201,18 @@ function BoardColumnRow({
   const [dragging, setDragging] = useState<DragInfo | null>(null);
   const [hover, setHover] = useState<HoverTarget | null>(null);
 
+  // Latest columns for handlers that run after a re-render (see runMove).
+  const columnsRef = useRef(columns);
+  useEffect(() => {
+    columnsRef.current = columns;
+  });
+  // Drop requests are serialized: if a move is still in flight, the next drop
+  // is queued and processed after it settles. This keeps the optimistic board
+  // from racing ahead of the server (which surfaced as
+  // "beforeTaskId must be a task in the target column" 400s on quick drags).
+  const moveInFlight = useRef(false);
+  const queuedDrop = useRef<{ taskId: string; target: HoverTarget } | null>(null);
+
   async function handleAddColumn(event: FormEvent) {
     event.preventDefault();
     const title = columnTitle.trim();
@@ -211,24 +231,47 @@ function BoardColumnRow({
     }
   }
 
-  // Optimistic move with rollback: reorder locally, then reconcile with the
-  // server; restore the previous snapshot if the API rejects the move.
-  async function handleDrop(target: HoverTarget) {
+  function handleDrop(target: HoverTarget) {
     if (!dragging) return;
-    const snapshot = columns;
-    const next = applyMove(columns, dragging.taskId, target.columnId, target.beforeTaskId);
+    const taskId = dragging.taskId;
     setDragging(null);
     setHover(null);
-    if (next === columns) return;
-    onColumnsChange(next);
+    if (moveInFlight.current) {
+      queuedDrop.current = { taskId, target };
+      return;
+    }
+    void runMove(taskId, target);
+  }
+
+  // Optimistic move: reorder locally, then reconcile with the server. On
+  // success or failure the columns are re-fetched so the board always mirrors
+  // the server (fresh data is authoritative; no stale snapshot restore).
+  async function runMove(taskId: string, target: HoverTarget) {
+    moveInFlight.current = true;
+    const before = columnsRef.current;
+    const next = applyMove(before, taskId, target.columnId, target.beforeTaskId);
+    if (next !== before) {
+      onColumnsChange(next);
+    }
+    let succeeded = false;
     try {
-      await moveTask(boardId, dragging.taskId, {
+      await moveTask(boardId, taskId, {
         columnId: target.columnId,
         beforeTaskId: target.beforeTaskId,
       });
+      succeeded = true;
     } catch (err) {
-      onColumnsChange(snapshot);
       onError(err instanceof ApiError ? err.message : "Could not move task");
+    } finally {
+      moveInFlight.current = false;
+      void onChanged();
+      const nextQueued = queuedDrop.current;
+      queuedDrop.current = null;
+      // Only a move that the server accepted can be the basis for a queued
+      // follow-up drop; a rejected move is rolled back by the refetch above.
+      if (nextQueued && succeeded) {
+        void runMove(nextQueued.taskId, nextQueued.target);
+      }
     }
   }
 

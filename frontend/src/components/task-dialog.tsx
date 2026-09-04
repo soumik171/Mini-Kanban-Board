@@ -24,7 +24,7 @@ export function TaskDialog({
   boardId: string;
   task: Task;
   canEdit: boolean;
-  onSaved(task: Task): void;
+  onSaved(): void;
   onDeleted(): void;
   onClose(): void;
 }) {
@@ -64,7 +64,7 @@ export function TaskDialog({
     setBusy(true);
     setError(null);
     try {
-      const saved = await updateTask(boardId, task.id, {
+      await updateTask(boardId, task.id, {
         title: trimmedTitle,
         description: description.trim() || null,
         priority,
@@ -77,7 +77,8 @@ export function TaskDialog({
           .filter(Boolean),
         assigneeId: assigneeId || null,
       });
-      onSaved(saved);
+      // Close on success so the board behind shows the saved values.
+      onSaved();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save task");
     } finally {
@@ -301,7 +302,7 @@ export function TaskDialog({
                   disabled={busy}
                   className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:opacity-50"
                 >
-                  Save
+                  {busy ? "Saving…" : "Save"}
                 </button>
               ) : null}
             </div>
