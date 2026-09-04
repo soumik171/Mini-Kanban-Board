@@ -2,16 +2,20 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type DragEvent, type FormEvent } from "react";
 
 import { AppHeader } from "@/components/app-header";
 import { RequireAuth } from "@/components/require-auth";
+import { TaskDialog } from "@/components/task-dialog";
 import {
   ApiError,
   createColumn,
   createTask,
+  deleteColumn,
   getBoard,
   listColumns,
+  moveTask,
+  renameColumn,
   type BoardRole,
   type BoardSummary,
   type Column,
@@ -30,6 +34,16 @@ interface BoardState {
   role: BoardRole;
 }
 
+interface DragInfo {
+  taskId: string;
+  fromColumnId: string;
+}
+
+interface HoverTarget {
+  columnId: string;
+  beforeTaskId: string | null;
+}
+
 export default function BoardPage() {
   return (
     <RequireAuth>
@@ -45,6 +59,8 @@ function BoardContent() {
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!boardId) return;
@@ -115,31 +131,67 @@ function BoardContent() {
         </div>
       </div>
 
+      {actionError ? (
+        <div className="border-b border-red-100 bg-red-50 px-4 py-2 text-sm text-red-700">
+          {actionError}
+        </div>
+      ) : null}
+
       <BoardColumnRow
         boardId={boardId ?? ""}
         columns={columns}
         canEdit={canEdit}
         onChanged={() => void load()}
+        onColumnsChange={setColumns}
+        onError={setActionError}
+        onOpenTask={setSelectedTask}
       />
+
+      {selectedTask ? (
+        <TaskDialog
+          boardId={boardId ?? ""}
+          task={selectedTask}
+          canEdit={canEdit}
+          onSaved={(task) => {
+            setSelectedTask(task);
+            void load();
+          }}
+          onDeleted={() => {
+            setSelectedTask(null);
+            void load();
+          }}
+          onClose={() => setSelectedTask(null)}
+        />
+      ) : null}
     </main>
   );
 }
+
+// --------------------------------------------------------------- columns ---
 
 function BoardColumnRow({
   boardId,
   columns,
   canEdit,
   onChanged,
+  onColumnsChange,
+  onError,
+  onOpenTask,
 }: {
   boardId: string;
   columns: Column[];
   canEdit: boolean;
   onChanged(): void;
+  onColumnsChange(columns: Column[]): void;
+  onError(message: string): void;
+  onOpenTask(task: Task): void;
 }) {
   const [addingColumn, setAddingColumn] = useState(false);
   const [columnTitle, setColumnTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<DragInfo | null>(null);
+  const [hover, setHover] = useState<HoverTarget | null>(null);
 
   async function handleAddColumn(event: FormEvent) {
     event.preventDefault();
@@ -159,6 +211,27 @@ function BoardColumnRow({
     }
   }
 
+  // Optimistic move with rollback: reorder locally, then reconcile with the
+  // server; restore the previous snapshot if the API rejects the move.
+  async function handleDrop(target: HoverTarget) {
+    if (!dragging) return;
+    const snapshot = columns;
+    const next = applyMove(columns, dragging.taskId, target.columnId, target.beforeTaskId);
+    setDragging(null);
+    setHover(null);
+    if (next === columns) return;
+    onColumnsChange(next);
+    try {
+      await moveTask(boardId, dragging.taskId, {
+        columnId: target.columnId,
+        beforeTaskId: target.beforeTaskId,
+      });
+    } catch (err) {
+      onColumnsChange(snapshot);
+      onError(err instanceof ApiError ? err.message : "Could not move task");
+    }
+  }
+
   return (
     <div className="flex-1 overflow-x-auto px-4 py-6 sm:px-6">
       <div className="flex h-full items-start gap-4">
@@ -168,7 +241,18 @@ function BoardColumnRow({
             boardId={boardId}
             column={column}
             canEdit={canEdit}
+            dragging={dragging}
+            hover={hover}
+            onDragStart={(taskId, fromColumnId) => setDragging({ taskId, fromColumnId })}
+            onDragEnd={() => {
+              setDragging(null);
+              setHover(null);
+            }}
+            onHover={(target) => setHover(target)}
+            onDrop={handleDrop}
             onChanged={onChanged}
+            onError={onError}
+            onOpenTask={onOpenTask}
           />
         ))}
 
@@ -219,21 +303,80 @@ function BoardColumnRow({
   );
 }
 
+/** Reorder `taskId` into `columnId` just before `beforeTaskId` (null = end). */
+function applyMove(
+  columns: Column[],
+  taskId: string,
+  columnId: string,
+  beforeTaskId: string | null,
+): Column[] {
+  let task: Task | null = null;
+  let source: Column | null = null;
+  for (const column of columns) {
+    const found = column.tasks.find((candidate) => candidate.id === taskId);
+    if (found) {
+      task = found;
+      source = column;
+      break;
+    }
+  }
+  if (!task || !source) return columns;
+
+  const target = columns.find((column) => column.id === columnId);
+  if (!target) return columns;
+
+  const fromList = source.tasks.filter((candidate) => candidate.id !== taskId);
+  const targetList =
+    source.id === columnId ? fromList : target.tasks.filter((candidate) => candidate.id !== taskId);
+
+  const insertAt = beforeTaskId
+    ? targetList.findIndex((candidate) => candidate.id === beforeTaskId)
+    : -1;
+  const at = insertAt === -1 ? targetList.length : insertAt;
+  targetList.splice(at, 0, task);
+
+  return columns.map((column) => {
+    if (column.id === source?.id && column.id === columnId) return { ...column, tasks: targetList };
+    if (column.id === source?.id) return { ...column, tasks: fromList };
+    if (column.id === columnId) return { ...column, tasks: targetList };
+    return column;
+  });
+}
+
 function ColumnCard({
   boardId,
   column,
   canEdit,
+  dragging,
+  hover,
+  onDragStart,
+  onDragEnd,
+  onHover,
+  onDrop,
   onChanged,
+  onError,
+  onOpenTask,
 }: {
   boardId: string;
   column: Column;
   canEdit: boolean;
+  dragging: DragInfo | null;
+  hover: HoverTarget | null;
+  onDragStart(taskId: string, fromColumnId: string): void;
+  onDragEnd(): void;
+  onHover(target: HoverTarget | null): void;
+  onDrop(target: HoverTarget): void;
   onChanged(): void;
+  onError(message: string): void;
+  onOpenTask(task: Task): void;
 }) {
   const [taskTitle, setTaskTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(column.title);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   async function handleAddTask(event: FormEvent) {
     event.preventDefault();
@@ -253,20 +396,212 @@ function ColumnCard({
     }
   }
 
-  return (
-    <section className="flex max-h-full w-72 shrink-0 flex-col rounded-xl bg-slate-200/70">
-      <header className="flex items-center justify-between px-3 pb-1 pt-3">
-        <h3 className="text-sm font-semibold text-slate-700">{column.title}</h3>
-        <span className="text-xs font-medium text-slate-400">{column.tasks.length}</span>
-      </header>
+  async function handleRename(event: FormEvent) {
+    event.preventDefault();
+    const title = renameValue.trim();
+    if (!title || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await renameColumn(boardId, column.id, title);
+      setRenaming(false);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not rename column");
+    } finally {
+      setBusy(false);
+    }
+  }
 
-      <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
+  async function handleDeleteColumn() {
+    // Two-step confirm: the first click arms the delete, the second runs it.
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    try {
+      await deleteColumn(boardId, column.id);
+      onChanged();
+    } catch (err) {
+      setConfirmingDelete(false);
+      onError(err instanceof ApiError ? err.message : "Could not delete column");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const draggingInto = dragging !== null && hover?.columnId === column.id;
+  const draggingSelf = dragging !== null && dragging.fromColumnId === column.id;
+
+  return (
+    <section
+      className={`flex max-h-full w-72 shrink-0 flex-col rounded-xl bg-slate-200/70 ${
+        draggingSelf ? "opacity-90" : ""
+      }`}
+    >
+      <header className="group flex items-center justify-between gap-1 px-3 pb-1 pt-3">
+        {renaming && canEdit ? (
+          <form onSubmit={handleRename} className="flex min-w-0 flex-1 items-center gap-1">
+            <input
+              type="text"
+              autoFocus
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              maxLength={120}
+              className="w-full min-w-0 rounded-md border border-slate-300 px-1.5 py-0.5 text-sm font-semibold text-slate-700 outline-none focus:border-indigo-500"
+            />
+            <button
+              type="submit"
+              disabled={busy || !renameValue.trim()}
+              className="shrink-0 rounded-md bg-indigo-600 px-1.5 py-0.5 text-xs font-medium text-white disabled:opacity-50"
+            >
+              Save
+            </button>
+          </form>
+        ) : (
+          <>
+            <h3 className="truncate text-sm font-semibold text-slate-700" title={column.title}>
+              {column.title}
+            </h3>
+            <span className="text-xs font-medium text-slate-400">{column.tasks.length}</span>
+            {canEdit ? (
+              <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
+                <button
+                  type="button"
+                  aria-label="Rename column"
+                  onClick={() => {
+                    setRenameValue(column.title);
+                    setRenaming(true);
+                  }}
+                  className="rounded p-1 text-slate-400 hover:bg-slate-300/60 hover:text-slate-600"
+                >
+                  <svg viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+                    <path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" />
+                    <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  aria-label="Delete column"
+                  onClick={handleDeleteColumn}
+                  className="rounded p-1 text-slate-400 hover:bg-red-100 hover:text-red-600"
+                >
+                  <svg viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+                    <path
+                      fillRule="evenodd"
+                      d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482 41.03 41.03 0 0 0-2.365-.298V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.34.06a.75.75 0 1 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </button>
+              </span>
+            ) : null}
+          </>
+        )}
+      </header>
+      {error ? <p className="px-3 pb-1 text-xs text-red-600">{error}</p> : null}
+
+      {confirmingDelete ? (
+        <div className="mx-2 mb-1 flex items-center justify-between gap-2 rounded-lg bg-red-50 px-2 py-1.5 ring-1 ring-red-200">
+          <span className="text-xs font-medium text-red-700">
+            Delete this column and its {column.tasks.length}{" "}
+            {column.tasks.length === 1 ? "task" : "tasks"}?
+          </span>
+          <span className="flex shrink-0 gap-1">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handleDeleteColumn}
+              className="rounded bg-red-600 px-2 py-0.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              Delete
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingDelete(false)}
+              className="rounded bg-white px-2 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"
+            >
+              Keep
+            </button>
+          </span>
+        </div>
+      ) : null}
+
+      <div
+        className="flex flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2"
+        onDragOver={(e) => {
+          // Dragging over the gap between cards (not a card or the append
+          // zone) clears the indicator so stale lines don't linger.
+          if (dragging && e.target === e.currentTarget) {
+            e.preventDefault();
+            onHover(null);
+          }
+        }}
+      >
         {column.tasks.length === 0 && !adding ? (
-          <p className="px-2 py-4 text-center text-xs text-slate-400">No tasks yet</p>
+          <p className="px-2 py-4 text-center text-xs text-slate-400">
+            {dragging ? "Drop task here" : "No tasks yet"}
+          </p>
         ) : null}
+
         {column.tasks.map((task) => (
-          <TaskCard key={task.id} task={task} />
+          <div key={task.id}>
+            {hover?.columnId === column.id && hover.beforeTaskId === task.id ? (
+              <DropLine />
+            ) : null}
+            <TaskCard
+              task={task}
+              canEdit={canEdit}
+              isDragging={dragging?.taskId === task.id}
+              onDragStart={() => onDragStart(task.id, column.id)}
+              onDragEnd={onDragEnd}
+              onDragOverCard={(e) => {
+                if (!dragging || dragging.taskId === task.id) return;
+                e.preventDefault();
+                const rect = e.currentTarget.getBoundingClientRect();
+                const beforeSelf = e.clientY < rect.top + rect.height / 2;
+                onHover({
+                  columnId: column.id,
+                  beforeTaskId: beforeSelf ? task.id : nextTaskId(task, column.tasks),
+                });
+              }}
+              onDropCard={(e) => {
+                if (!dragging) return;
+                e.preventDefault();
+                const rect = e.currentTarget.getBoundingClientRect();
+                const beforeSelf = e.clientY < rect.top + rect.height / 2;
+                onDrop({
+                  columnId: column.id,
+                  beforeTaskId: beforeSelf ? task.id : nextTaskId(task, column.tasks),
+                });
+              }}
+              onOpen={() => onOpenTask(task)}
+            />
+          </div>
         ))}
+
+        {/* Drop zone: drop anywhere below the last card to append at the end. */}
+        <div
+          onDragOver={(e) => {
+            if (!dragging) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            onHover({ columnId: column.id, beforeTaskId: null });
+          }}
+          onDragLeave={() => {
+            if (dragging) onHover(null);
+          }}
+          onDrop={(e) => {
+            if (!dragging) return;
+            e.preventDefault();
+            onDrop({ columnId: column.id, beforeTaskId: null });
+          }}
+          className={`min-h-2 flex-1 rounded-lg transition ${
+            draggingInto && hover?.beforeTaskId === null ? "bg-indigo-50 ring-2 ring-inset ring-indigo-400" : ""
+          }`}
+        />
 
         {canEdit && adding ? (
           <form onSubmit={handleAddTask} className="space-y-2 rounded-lg bg-white p-2 shadow-sm">
@@ -279,7 +614,6 @@ function ColumnCard({
               maxLength={200}
               className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500"
             />
-            {error ? <p className="text-xs text-red-600">{error}</p> : null}
             <div className="flex gap-1.5">
               <button
                 type="submit"
@@ -316,9 +650,53 @@ function ColumnCard({
   );
 }
 
-function TaskCard({ task }: { task: Task }) {
+/** Id of the task that follows `task` in `tasks`, or null if it is last. */
+function nextTaskId(task: Task, tasks: Task[]): string | null {
+  const index = tasks.findIndex((candidate) => candidate.id === task.id);
+  const next = tasks[index + 1];
+  return next?.id ?? null;
+}
+
+function DropLine() {
+  return <div className="h-0.5 rounded-full bg-indigo-500" />;
+}
+
+function TaskCard({
+  task,
+  canEdit,
+  isDragging,
+  onDragStart,
+  onDragEnd,
+  onDragOverCard,
+  onDropCard,
+  onOpen,
+}: {
+  task: Task;
+  canEdit: boolean;
+  isDragging: boolean;
+  onDragStart(): void;
+  onDragEnd(): void;
+  onDragOverCard(e: DragEvent<HTMLElement>): void;
+  onDropCard(e: DragEvent<HTMLElement>): void;
+  onOpen(): void;
+}) {
   return (
-    <article className="group rounded-lg bg-white p-3 shadow-sm transition hover:shadow">
+    <article
+      draggable={canEdit}
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/plain", task.id);
+        e.dataTransfer.effectAllowed = "move";
+        onDragStart();
+      }}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOverCard}
+      onDrop={onDropCard}
+      onClick={onOpen}
+      className={`group rounded-lg bg-white p-3 shadow-sm transition hover:shadow ${
+        isDragging ? "opacity-40" : ""
+      } ${canEdit ? "cursor-grab select-none active:cursor-grabbing" : "cursor-pointer"}`}
+      title="Open task"
+    >
       <div className="flex items-start justify-between gap-2">
         <h4 className="text-sm font-medium leading-snug text-slate-800">{task.title}</h4>
         <span

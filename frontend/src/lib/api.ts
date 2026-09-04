@@ -289,7 +289,7 @@ export async function deleteColumn(boardId: string, columnId: string): Promise<v
 
 export interface NewTask {
   title: string;
-  description?: string;
+  description?: string | null;
   priority?: Priority;
   dueDate?: string | null;
   labels?: string[];
