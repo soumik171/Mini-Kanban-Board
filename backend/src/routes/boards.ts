@@ -1,7 +1,8 @@
 import { Router } from 'express';
-import type { AuditAction, Prisma } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
+import { recordAudit } from '../lib/audit.js';
 import { HttpError } from '../lib/http-error.js';
 import { prisma } from '../lib/prisma.js';
 import { parseBody } from '../lib/validation.js';
@@ -10,6 +11,7 @@ import {
   currentBoardAccess,
   requireBoardAccess,
 } from '../middleware/board-access.js';
+import { boardContentRouter } from './board-content.js';
 
 const ASSIGNABLE_ROLES = z.enum(['EDITOR', 'VIEWER']);
 
@@ -25,6 +27,11 @@ const shareBoardSchema = z.object({
 
 const changeRoleSchema = z.object({
   role: ASSIGNABLE_ROLES,
+});
+
+const updateBoardSchema = z.object({
+  title: z.string().trim().min(1, 'Title is required').max(120).optional(),
+  description: z.string().trim().max(1000).nullable().optional(),
 });
 
 const boardSummarySelect = {
@@ -53,26 +60,6 @@ function boardJson(board: BoardSummary) {
     createdAt: board.createdAt,
     updatedAt: board.updatedAt,
   };
-}
-
-async function recordAudit(params: {
-  boardId: string;
-  actorId: string;
-  action: AuditAction;
-  entityType: string;
-  entityId?: string;
-  metadata?: Prisma.InputJsonValue;
-}): Promise<void> {
-  await prisma.auditEvent.create({
-    data: {
-      boardId: params.boardId,
-      actorId: params.actorId,
-      action: params.action,
-      entityType: params.entityType,
-      entityId: params.entityId ?? null,
-      metadata: params.metadata,
-    },
-  });
 }
 
 export const boardsRouter = Router();
@@ -266,3 +253,50 @@ boardsRouter.delete('/:boardId/members/:userId', requireBoardAccess('OWNER'), as
 
   res.status(204).end();
 });
+
+boardsRouter.patch('/:boardId', requireBoardAccess('EDITOR'), async (req, res) => {
+  const data = parseBody(updateBoardSchema, req);
+  const { board } = currentBoardAccess(res);
+  const actorId = currentUserId(res);
+
+  const patch: Prisma.BoardUpdateInput = {};
+  if (data.title !== undefined) {
+    patch.title = data.title;
+  }
+  if (data.description !== undefined) {
+    patch.description = data.description;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    res.json({ board: boardJson(board) });
+    return;
+  }
+
+  const updated = await prisma.board.update({
+    where: { id: board.id },
+    data: patch,
+    select: boardSummarySelect,
+  });
+  await recordAudit({
+    boardId: board.id,
+    actorId,
+    action: 'BOARD_UPDATED',
+    entityType: 'board',
+    entityId: board.id,
+    metadata: { fields: Object.keys(patch) },
+  });
+
+  res.json({ board: boardJson(updated) });
+});
+
+boardsRouter.delete('/:boardId', requireBoardAccess('OWNER'), async (_req, res) => {
+  const { board } = currentBoardAccess(res);
+
+  // Deleting the board cascades members, columns, tasks, comments, and the
+  // board's audit history by design (AuditEvent.boardId is onDelete: Cascade).
+  await prisma.board.delete({ where: { id: board.id } });
+  res.status(204).end();
+});
+
+// Columns and tasks live under /api/boards/:boardId (see board-content.ts).
+boardsRouter.use('/:boardId', boardContentRouter);
