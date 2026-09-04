@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 
+import { ActivityPanel } from "@/components/activity-panel";
 import { AppHeader } from "@/components/app-header";
+import { MembersPanel } from "@/components/members-panel";
 import { RequireAuth } from "@/components/require-auth";
 import { TaskDialog } from "@/components/task-dialog";
 import {
@@ -61,6 +63,7 @@ function BoardContent() {
   const [error, setError] = useState<string | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [panel, setPanel] = useState<"activity" | "members" | null>(null);
 
   const load = useCallback(async () => {
     if (!boardId) return;
@@ -133,9 +136,25 @@ function BoardContent() {
               <p className="mt-1 text-sm text-slate-500">{detail.board.description}</p>
             ) : null}
           </div>
-          <p className="text-xs text-slate-400">
-            Owned by {detail.board.owner.name}
-          </p>
+          <div className="flex flex-col items-end gap-2">
+            <p className="text-xs text-slate-400">Owned by {detail.board.owner.name}</p>
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                onClick={() => setPanel("members")}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-600"
+              >
+                Members
+              </button>
+              <button
+                type="button"
+                onClick={() => setPanel("activity")}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-600"
+              >
+                Activity
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -169,6 +188,22 @@ function BoardContent() {
             void load();
           }}
           onClose={() => setSelectedTask(null)}
+        />
+      ) : null}
+
+      {panel === "activity" ? (
+        <ActivityPanel
+          boardId={boardId ?? ""}
+          columns={columns}
+          onClose={() => setPanel(null)}
+        />
+      ) : null}
+
+      {panel === "members" ? (
+        <MembersPanel
+          boardId={boardId ?? ""}
+          isOwner={detail.role === "OWNER"}
+          onClose={() => setPanel(null)}
         />
       ) : null}
     </main>

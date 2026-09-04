@@ -12,6 +12,7 @@ import {
   type Task,
 } from "@/lib/api";
 import { PRIORITY_ORDER, PRIORITY_STYLES, initials } from "@/lib/format";
+import { TaskComments } from "./task-comments";
 
 export function TaskDialog({
   boardId,
@@ -252,6 +253,8 @@ export function TaskDialog({
           {error ? (
             <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
           ) : null}
+
+          <TaskComments boardId={boardId} taskId={task.id} canEdit={canEdit} />
 
           <div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-4">
             {canEdit ? (
