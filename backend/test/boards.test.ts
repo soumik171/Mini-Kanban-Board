@@ -283,3 +283,70 @@ describe('boards & sharing', () => {
     );
   });
 });
+
+describe('authorization', () => {
+  it('lets an EDITOR read a board but never manage membership', async () => {
+    const owner = await createUser('authz-owner');
+    const editor = await createUser('authz-editor');
+    const outsider = await createUser('authz-outside');
+    const board = await createBoard(owner);
+
+    await api('POST', `/api/boards/${board.id}/members`, {
+      bearer: owner.bearer,
+      body: { email: editor.email, role: 'EDITOR' },
+    });
+
+    const detail = await api('GET', `/api/boards/${board.id}`, { bearer: editor.bearer });
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as { role: string }).role).toBe('EDITOR');
+
+    const members = await api('GET', `/api/boards/${board.id}/members`, { bearer: editor.bearer });
+    expect(members.status).toBe(200);
+
+    const add = await api('POST', `/api/boards/${board.id}/members`, {
+      bearer: editor.bearer,
+      body: { email: outsider.email, role: 'VIEWER' },
+    });
+    expect(add.status).toBe(403);
+
+    const change = await api('PATCH', `/api/boards/${board.id}/members/${outsider.id}`, {
+      bearer: editor.bearer,
+      body: { role: 'EDITOR' },
+    });
+    expect(change.status).toBe(403);
+
+    const remove = await api('DELETE', `/api/boards/${board.id}/members/${outsider.id}`, {
+      bearer: editor.bearer,
+    });
+    expect(remove.status).toBe(403);
+  });
+
+  it('hides the member list from non-members', async () => {
+    const owner = await createUser('authz-list-owner');
+    const stranger = await createUser('authz-list-stranger');
+    const board = await createBoard(owner);
+
+    const members = await api('GET', `/api/boards/${board.id}/members`, { bearer: stranger.bearer });
+    expect(members.status).toBe(403);
+  });
+
+  it('rejects attempts to escalate a member to OWNER', async () => {
+    const owner = await createUser('authz-escalate-owner');
+    const member = await createUser('authz-escalate-member');
+    const board = await createBoard(owner);
+
+    await api('POST', `/api/boards/${board.id}/members`, {
+      bearer: owner.bearer,
+      body: { email: member.email, role: 'VIEWER' },
+    });
+
+    const escalate = await api('PATCH', `/api/boards/${board.id}/members/${member.id}`, {
+      bearer: owner.bearer,
+      body: { role: 'OWNER' },
+    });
+    expect(escalate.status).toBe(400);
+    expect(((await escalate.json()) as { error: { code: string } }).error.code).toBe(
+      'VALIDATION_ERROR',
+    );
+  });
+});

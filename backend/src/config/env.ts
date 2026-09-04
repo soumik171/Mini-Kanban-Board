@@ -11,6 +11,15 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
+function positiveInt(name: string, value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`Invalid ${name} value: "${value}"`);
+  }
+  return n;
+}
+
 const nodeEnv = process.env.NODE_ENV ?? 'development';
 const isProd = nodeEnv === 'production';
 
@@ -33,4 +42,10 @@ export const env = {
   jwtRefreshSecret: secret('JWT_REFRESH_SECRET', 'dev-only-refresh-secret-change-me'),
   accessTokenTtlSeconds: 15 * 60,
   refreshTokenTtlSeconds: 7 * 24 * 60 * 60,
+  // Requests per 15-minute window, keyed by IP. Tune via env for production.
+  authRateLimitMax: positiveInt('AUTH_RATE_LIMIT_MAX', process.env.AUTH_RATE_LIMIT_MAX, 100),
+  apiRateLimitMax: positiveInt('API_RATE_LIMIT_MAX', process.env.API_RATE_LIMIT_MAX, 1000),
+  // Set TRUST_PROXY=1 when running behind a reverse proxy so rate limits key
+  // on the real client IP instead of the proxy's.
+  trustProxy: process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true',
 } as const;

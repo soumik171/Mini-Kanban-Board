@@ -16,8 +16,20 @@ export function errorHandler(
     res.status(err.status).json({ error: { code: err.code, message: err.message } });
     return;
   }
-  const syntaxError = err as { status?: number };
-  if (err instanceof SyntaxError && syntaxError.status === 400) {
+  const bodyParserError = err as { status?: number; type?: string };
+  if (bodyParserError.type === 'entity.too.large') {
+    res.status(413).json({ error: { code: 'PAYLOAD_TOO_LARGE', message: 'Request body too large' } });
+    return;
+  }
+  if (
+    bodyParserError.status === 415 ||
+    bodyParserError.type === 'encoding.unsupported' ||
+    bodyParserError.type === 'charset.unsupported'
+  ) {
+    res.status(415).json({ error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Unsupported media type or charset' } });
+    return;
+  }
+  if (err instanceof SyntaxError && bodyParserError.status === 400) {
     res.status(400).json({ error: { code: 'INVALID_JSON', message: 'Malformed JSON body' } });
     return;
   }
