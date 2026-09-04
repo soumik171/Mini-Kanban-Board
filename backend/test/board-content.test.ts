@@ -104,6 +104,30 @@ async function createTask(
   return parsed.task;
 }
 
+async function moveTask(
+  bearer: string,
+  boardId: string,
+  taskId: string,
+  body: { columnId: string; beforeTaskId?: string | null },
+): Promise<Response> {
+  return api('PATCH', `/api/boards/${boardId}/tasks/${taskId}/move`, { bearer, body });
+}
+
+async function columnsOrder(
+  boardId: string,
+  bearer: string,
+): Promise<{ titles: string[]; positions: number[] }[]> {
+  const list = await api('GET', `/api/boards/${boardId}/columns`, { bearer });
+  expect(list.status).toBe(200);
+  const body = (await list.json()) as {
+    columns: { tasks: { title: string; position: number }[] }[];
+  };
+  return body.columns.map((column) => ({
+    titles: column.tasks.map((t) => t.title),
+    positions: column.tasks.map((t) => t.position),
+  }));
+}
+
 beforeAll(async () => {
   server = await startTestServer();
   baseUrl = server.baseUrl;
@@ -473,5 +497,196 @@ describe('board content CRUD', () => {
       body: { title: 'Task', labels: Array.from({ length: 21 }, () => 'x') },
     });
     expect(tooManyLabels.status).toBe(400);
+  });
+});
+
+describe('task movement', () => {
+  it('moves a task between columns and records a TASK_MOVED audit', async () => {
+    const owner = await createUser('mv-owner');
+    const board = await createBoard(owner);
+    const todo = await createColumn(owner.bearer, board.id, 'To Do');
+    const done = await createColumn(owner.bearer, board.id, 'Done');
+    const task = await createTask(owner.bearer, board.id, todo.id, { title: 'Card 1' });
+
+    const move = await moveTask(owner.bearer, board.id, task.id, { columnId: done.id });
+    expect(move.status).toBe(200);
+    const moveBody = (await move.json()) as { task: { columnId: string; position: number } };
+    expect(moveBody.task.columnId).toBe(done.id);
+    expect(moveBody.task.position).toBe(1);
+
+    const order = await columnsOrder(board.id, owner.bearer);
+    expect(order[0]?.titles).toEqual([]);
+    expect(order[1]?.titles).toEqual(['Card 1']);
+
+    const audit = await prisma.auditEvent.findFirst({
+      where: { boardId: board.id, action: 'TASK_MOVED' },
+      select: { metadata: true },
+    });
+    expect(audit?.metadata).toEqual(
+      expect.objectContaining({
+        fromColumn: todo.id,
+        toColumn: done.id,
+        oldPosition: 1,
+        newPosition: 1,
+      }),
+    );
+  });
+
+  it('reorders tasks within a column using fractional positions', async () => {
+    const owner = await createUser('reorder-owner');
+    const board = await createBoard(owner);
+    const column = await createColumn(owner.bearer, board.id, 'Backlog');
+    const a = await createTask(owner.bearer, board.id, column.id, { title: 'A' });
+    const b = await createTask(owner.bearer, board.id, column.id, { title: 'B' });
+    const c = await createTask(owner.bearer, board.id, column.id, { title: 'C' });
+
+    const first = await moveTask(owner.bearer, board.id, c.id, {
+      columnId: column.id,
+      beforeTaskId: a.id,
+    });
+    expect(first.status).toBe(200);
+
+    let order = await columnsOrder(board.id, owner.bearer);
+    expect(order[0]?.titles).toEqual(['C', 'A', 'B']);
+
+    const second = await moveTask(owner.bearer, board.id, b.id, {
+      columnId: column.id,
+      beforeTaskId: c.id,
+    });
+    expect(second.status).toBe(200);
+
+    order = await columnsOrder(board.id, owner.bearer);
+    expect(order[0]?.titles).toEqual(['B', 'C', 'A']);
+    const positions = order[0]?.positions ?? [];
+    expect(positions).toHaveLength(3);
+    expect(positions[0] ?? 0).toBeLessThan(1);
+    expect(positions[0] ?? 0).toBeLessThan(positions[1] ?? 0);
+    expect(positions[1] ?? 0).toBeLessThan(positions[2] ?? 0);
+  });
+
+  it('appends to the end when beforeTaskId is omitted or null', async () => {
+    const owner = await createUser('append-owner');
+    const board = await createBoard(owner);
+    const column = await createColumn(owner.bearer, board.id, 'Col');
+    const a = await createTask(owner.bearer, board.id, column.id, { title: 'A' });
+    await createTask(owner.bearer, board.id, column.id, { title: 'B' });
+    await createTask(owner.bearer, board.id, column.id, { title: 'C' });
+
+    const move = await moveTask(owner.bearer, board.id, a.id, {
+      columnId: column.id,
+      beforeTaskId: null,
+    });
+    expect(move.status).toBe(200);
+
+    const order = await columnsOrder(board.id, owner.bearer);
+    expect(order[0]?.titles).toEqual(['B', 'C', 'A']);
+    expect(order[0]?.positions[2]).toBe(4);
+  });
+
+  it('treats order-preserving moves as no-ops without new audit events', async () => {
+    const owner = await createUser('noop-owner');
+    const board = await createBoard(owner);
+    const column = await createColumn(owner.bearer, board.id, 'Col');
+    await createTask(owner.bearer, board.id, column.id, { title: 'A' });
+    const b = await createTask(owner.bearer, board.id, column.id, { title: 'B' });
+    const c = await createTask(owner.bearer, board.id, column.id, { title: 'C' });
+
+    const countBefore = await prisma.auditEvent.count({
+      where: { boardId: board.id, action: 'TASK_MOVED' },
+    });
+    expect(countBefore).toBe(0);
+
+    // B already sits directly before C: dropping it before C changes nothing.
+    const before = await moveTask(owner.bearer, board.id, b.id, {
+      columnId: column.id,
+      beforeTaskId: c.id,
+    });
+    expect(before.status).toBe(200);
+    // C is already last: appending it changes nothing.
+    const append = await moveTask(owner.bearer, board.id, c.id, { columnId: column.id });
+    expect(append.status).toBe(200);
+
+    const order = await columnsOrder(board.id, owner.bearer);
+    expect(order[0]?.titles).toEqual(['A', 'B', 'C']);
+    expect(order[0]?.positions).toEqual([1, 2, 3]);
+
+    const countAfter = await prisma.auditEvent.count({
+      where: { boardId: board.id, action: 'TASK_MOVED' },
+    });
+    expect(countAfter).toBe(0);
+  });
+
+  it('guards invalid moves and enforces the EDITOR role', async () => {
+    const owner = await createUser('guard-mv-owner');
+    const viewer = await createUser('guard-mv-viewer');
+    const stranger = await createUser('guard-mv-stranger');
+    const board = await createBoard(owner);
+    await share(board.id, owner, viewer, 'VIEWER');
+    const col1 = await createColumn(owner.bearer, board.id, 'One');
+    const col2 = await createColumn(owner.bearer, board.id, 'Two');
+    const task = await createTask(owner.bearer, board.id, col1.id, { title: 'T' });
+    const other = await createTask(owner.bearer, board.id, col2.id, { title: 'Other' });
+
+    const missingColumn = await moveTask(owner.bearer, board.id, task.id, { columnId: 'nope' });
+    expect(missingColumn.status).toBe(404);
+    expect(((await missingColumn.json()) as { error: { code: string } }).error.code).toBe(
+      'COLUMN_NOT_FOUND',
+    );
+
+    const missingTask = await moveTask(owner.bearer, board.id, 'no-such-task', {
+      columnId: col1.id,
+    });
+    expect(missingTask.status).toBe(404);
+
+    // An anchor that lives in a different column cannot be targeted.
+    const crossAnchor = await moveTask(owner.bearer, board.id, task.id, {
+      columnId: col1.id,
+      beforeTaskId: other.id,
+    });
+    expect(crossAnchor.status).toBe(400);
+
+    const ghostAnchor = await moveTask(owner.bearer, board.id, task.id, {
+      columnId: col1.id,
+      beforeTaskId: 'ghost',
+    });
+    expect(ghostAnchor.status).toBe(400);
+
+    const asViewer = await moveTask(viewer.bearer, board.id, task.id, { columnId: col1.id });
+    expect(asViewer.status).toBe(403);
+
+    const asStranger = await moveTask(stranger.bearer, board.id, task.id, { columnId: col1.id });
+    expect(asStranger.status).toBe(403);
+  });
+
+  it('keeps repeated top insertions strictly ordered without losing key space', async () => {
+    const owner = await createUser('frac-owner');
+    const board = await createBoard(owner);
+    const column = await createColumn(owner.bearer, board.id, 'Col');
+    const a = await createTask(owner.bearer, board.id, column.id, { title: 'A' });
+    const b = await createTask(owner.bearer, board.id, column.id, { title: 'B' });
+
+    // Alternately hoist B and A to the top: each move halves the head position.
+    for (let i = 0; i < 24; i += 1) {
+      const mover = i % 2 === 0 ? b : a;
+      const anchor = i % 2 === 0 ? a : b;
+      const res = await moveTask(owner.bearer, board.id, mover.id, {
+        columnId: column.id,
+        beforeTaskId: anchor.id,
+      });
+      expect(res.status).toBe(200);
+    }
+
+    const order = await columnsOrder(board.id, owner.bearer);
+    const titles = order[0]?.titles ?? [];
+    const positions = order[0]?.positions ?? [];
+    expect(titles).toEqual(['A', 'B']); // 24 moves: even count returns to A-first
+    expect(positions).toHaveLength(2);
+    expect(positions[0] ?? 0).toBeGreaterThan(0);
+    expect(positions[0] ?? 0).toBeLessThan(positions[1] ?? 0);
+
+    const auditCount = await prisma.auditEvent.count({
+      where: { boardId: board.id, action: 'TASK_MOVED' },
+    });
+    expect(auditCount).toBe(24);
   });
 });

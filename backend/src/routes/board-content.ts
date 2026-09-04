@@ -39,6 +39,13 @@ const updateTaskSchema = z.object({
   assigneeId: z.string().trim().min(1).nullable().optional(),
 });
 
+// beforeTaskId is the task the moved task should land in front of; omit it
+// (or pass null) to append the task to the end of the target column.
+const moveTaskSchema = z.object({
+  columnId: z.string().trim().min(1, 'columnId is required'),
+  beforeTaskId: z.string().trim().min(1).nullish(),
+});
+
 const taskSummarySelect = {
   id: true,
   title: true,
@@ -55,6 +62,8 @@ const taskSummarySelect = {
 type TaskSummary = Prisma.TaskGetPayload<{ select: typeof taskSummarySelect }>;
 
 const taskDetailSelect = { ...taskSummarySelect, columnId: true } satisfies Prisma.TaskSelect;
+
+type TaskDetail = Prisma.TaskGetPayload<{ select: typeof taskDetailSelect }>;
 
 const columnWithTasksSelect = {
   id: true,
@@ -80,6 +89,10 @@ function taskJson(task: TaskSummary) {
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
   };
+}
+
+function taskDetailJson(task: TaskDetail) {
+  return { ...taskJson(task), columnId: task.columnId };
 }
 
 function columnJson(column: ColumnWithTasks) {
@@ -115,6 +128,29 @@ async function assertAssigneeOnBoard(board: BoardWithOwner, assigneeId: string):
   if (!member) {
     throw new HttpError(400, 'USER_NOT_ON_BOARD', 'Assignee must be a member of this board');
   }
+}
+
+/**
+ * Returns a float strictly between the neighbouring positions (or beyond the
+ * column's start/end), or null when no representable float fits in the gap -
+ * at which point the caller compacts the column's positions and retries.
+ */
+function gapPosition(lower: number | null, upper: number | null): number | null {
+  if (lower === null) {
+    if (upper === null) {
+      return 1; // first task into an empty column
+    }
+    // Top of the column: split the head position in half.
+    const pos = upper / 2;
+    return pos > 0 && pos < upper ? pos : null;
+  }
+  if (upper === null) {
+    // End of the column: one past the tail position.
+    const pos = lower + 1;
+    return pos > lower ? pos : null;
+  }
+  const pos = (lower + upper) / 2;
+  return pos > lower && pos < upper ? pos : null;
 }
 
 /**
@@ -249,7 +285,7 @@ boardContentRouter.post(
       metadata: { columnId: column.id, position },
     });
 
-    res.status(201).json({ task: taskJson(task) });
+    res.status(201).json({ task: taskDetailJson(task) });
   },
 );
 
@@ -262,7 +298,7 @@ boardContentRouter.get('/tasks/:taskId', requireBoardAccess(), async (req, res) 
   if (!task) {
     throw new HttpError(404, 'TASK_NOT_FOUND', 'Task not found');
   }
-  res.json({ task: taskJson(task) });
+  res.json({ task: taskDetailJson(task) });
 });
 
 boardContentRouter.patch('/tasks/:taskId', requireBoardAccess('EDITOR'), async (req, res) => {
@@ -315,7 +351,7 @@ boardContentRouter.patch('/tasks/:taskId', requireBoardAccess('EDITOR'), async (
     metadata: { fields },
   });
 
-  res.json({ task: taskJson(updated) });
+  res.json({ task: taskDetailJson(updated) });
 });
 
 boardContentRouter.delete('/tasks/:taskId', requireBoardAccess('EDITOR'), async (req, res) => {
@@ -342,3 +378,121 @@ boardContentRouter.delete('/tasks/:taskId', requireBoardAccess('EDITOR'), async 
 
   res.status(204).end();
 });
+
+boardContentRouter.patch(
+  '/tasks/:taskId/move',
+  requireBoardAccess('EDITOR'),
+  async (req, res) => {
+    const data = parseBody(moveTaskSchema, req);
+    const { board } = currentBoardAccess(res);
+    const actorId = currentUserId(res);
+    const taskId = req.params.taskId as string;
+
+    const task = await prisma.task.findFirst({
+      where: { id: taskId, column: { boardId: board.id } },
+      select: { id: true, columnId: true, position: true },
+    });
+    if (!task) {
+      throw new HttpError(404, 'TASK_NOT_FOUND', 'Task not found');
+    }
+
+    const targetColumn = await prisma.column.findFirst({
+      where: { id: data.columnId, boardId: board.id },
+      select: { id: true },
+    });
+    if (!targetColumn) {
+      throw new HttpError(404, 'COLUMN_NOT_FOUND', 'Column not found');
+    }
+
+    // Current order of the target column, with the moved task removed from the
+    // picture; the destination index is where it will be re-inserted.
+    const rows = await prisma.task.findMany({
+      where: { columnId: targetColumn.id },
+      select: { id: true, position: true },
+      orderBy: { position: 'asc' },
+    });
+    const others = rows.filter((row) => row.id !== task.id);
+
+    const anchorId = data.beforeTaskId ?? null;
+    let destIndex: number;
+    if (anchorId === null) {
+      destIndex = others.length; // append to the end
+    } else {
+      const anchorIndex = others.findIndex((row) => row.id === anchorId);
+      if (anchorIndex === -1) {
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          'beforeTaskId must be a task in the target column',
+        );
+      }
+      destIndex = anchorIndex;
+    }
+
+    // Dropping a task somewhere that does not change its order is a no-op.
+    let noOp = false;
+    if (task.columnId === targetColumn.id) {
+      if (anchorId === null) {
+        noOp = others.every((row) => row.position < task.position); // already last
+      } else {
+        const anchorRow = rows.findIndex((row) => row.id === anchorId);
+        noOp = rows[anchorRow - 1]?.id === task.id; // already directly before the anchor
+      }
+    }
+    if (noOp) {
+      const current = await prisma.task.findUnique({
+        where: { id: task.id },
+        select: taskDetailSelect,
+      });
+      if (!current) {
+        throw new HttpError(404, 'TASK_NOT_FOUND', 'Task not found');
+      }
+      res.json({ task: taskDetailJson(current) });
+      return;
+    }
+
+    // Position the task between its future neighbours. When no float fits in
+    // the gap, compact the column's tasks to integer positions and retry.
+    const lower = destIndex > 0 ? (others[destIndex - 1]?.position ?? null) : null;
+    const upper = destIndex < others.length ? (others[destIndex]?.position ?? null) : null;
+    let newPosition = gapPosition(lower, upper);
+    if (newPosition === null) {
+      await prisma.$transaction(
+        others.map((row, index) =>
+          prisma.task.update({
+            where: { id: row.id },
+            data: { position: index + 1 },
+          }),
+        ),
+      );
+      if (destIndex === 0) {
+        newPosition = 0.5;
+      } else if (destIndex >= others.length) {
+        newPosition = others.length + 1;
+      } else {
+        newPosition = destIndex + 0.5;
+      }
+    }
+
+    const updated = await prisma.task.update({
+      where: { id: task.id },
+      data: { columnId: targetColumn.id, position: newPosition },
+      select: taskDetailSelect,
+    });
+    await recordAudit({
+      boardId: board.id,
+      actorId,
+      action: 'TASK_MOVED',
+      entityType: 'task',
+      entityId: task.id,
+      metadata: {
+        fromColumn: task.columnId,
+        toColumn: targetColumn.id,
+        oldPosition: task.position,
+        newPosition,
+      },
+    });
+
+    res.json({ task: taskDetailJson(updated) });
+  },
+);
