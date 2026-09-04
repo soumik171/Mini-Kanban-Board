@@ -298,5 +298,60 @@ boardsRouter.delete('/:boardId', requireBoardAccess('OWNER'), async (_req, res) 
   res.status(204).end();
 });
 
-// Columns and tasks live under /api/boards/:boardId (see board-content.ts).
+const activityQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  cursor: z.string().min(1).optional(),
+});
+
+const activityEventSelect = {
+  id: true,
+  action: true,
+  entityType: true,
+  entityId: true,
+  metadata: true,
+  createdAt: true,
+  actor: { select: { id: true, email: true, name: true } },
+} satisfies Prisma.AuditEventSelect;
+
+boardsRouter.get('/:boardId/activity', requireBoardAccess(), async (req, res) => {
+  const parsedQuery = activityQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid query parameters');
+  }
+  const { limit, cursor } = parsedQuery.data;
+  const { board } = currentBoardAccess(res);
+
+  const cursorEvent = cursor
+    ? await prisma.auditEvent.findUnique({
+        where: { id: cursor },
+        select: { id: true, createdAt: true },
+      })
+    : null;
+  if (cursor && !cursorEvent) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Unknown activity cursor');
+  }
+
+  const where: Prisma.AuditEventWhereInput = { boardId: board.id };
+  if (cursorEvent) {
+    // Stable keyset pagination: strictly older than the cursor event, with
+    // createdAt ties broken by id.
+    where.OR = [
+      { createdAt: { lt: cursorEvent.createdAt } },
+      { createdAt: cursorEvent.createdAt, id: { lt: cursorEvent.id } },
+    ];
+  }
+
+  const events = await prisma.auditEvent.findMany({
+    where,
+    select: activityEventSelect,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: limit + 1,
+  });
+
+  const page = events.slice(0, limit);
+  const nextCursor = events.length > limit ? (page[page.length - 1]?.id ?? null) : null;
+  res.json({ events: page, nextCursor });
+});
+
+// Columns, tasks, and comments live under /api/boards/:boardId (see board-content.ts).
 boardsRouter.use('/:boardId', boardContentRouter);

@@ -46,6 +46,10 @@ const moveTaskSchema = z.object({
   beforeTaskId: z.string().trim().min(1).nullish(),
 });
 
+const commentSchema = z.object({
+  content: z.string().trim().min(1, 'Comment cannot be empty').max(2000),
+});
+
 const taskSummarySelect = {
   id: true,
   title: true,
@@ -76,6 +80,16 @@ const columnWithTasksSelect = {
 
 type ColumnWithTasks = Prisma.ColumnGetPayload<{ select: typeof columnWithTasksSelect }>;
 
+const commentSelect = {
+  id: true,
+  content: true,
+  taskId: true,
+  createdAt: true,
+  author: { select: { id: true, email: true, name: true } },
+} satisfies Prisma.CommentSelect;
+
+type CommentSummary = Prisma.CommentGetPayload<{ select: typeof commentSelect }>;
+
 function taskJson(task: TaskSummary) {
   return {
     id: task.id,
@@ -93,6 +107,16 @@ function taskJson(task: TaskSummary) {
 
 function taskDetailJson(task: TaskDetail) {
   return { ...taskJson(task), columnId: task.columnId };
+}
+
+function commentJson(comment: CommentSummary) {
+  return {
+    id: comment.id,
+    content: comment.content,
+    taskId: comment.taskId,
+    author: comment.author,
+    createdAt: comment.createdAt,
+  };
 }
 
 function columnJson(column: ColumnWithTasks) {
@@ -114,6 +138,17 @@ async function findBoardColumn(boardId: string, columnId: string) {
     throw new HttpError(404, 'COLUMN_NOT_FOUND', 'Column not found');
   }
   return column;
+}
+
+async function findBoardTask(boardId: string, taskId: string) {
+  const task = await prisma.task.findFirst({
+    where: { id: taskId, column: { boardId } },
+    select: { id: true },
+  });
+  if (!task) {
+    throw new HttpError(404, 'TASK_NOT_FOUND', 'Task not found');
+  }
+  return task;
 }
 
 async function assertAssigneeOnBoard(board: BoardWithOwner, assigneeId: string): Promise<void> {
@@ -494,5 +529,66 @@ boardContentRouter.patch(
     });
 
     res.json({ task: taskDetailJson(updated) });
+  },
+);
+
+boardContentRouter.get('/tasks/:taskId/comments', requireBoardAccess(), async (req, res) => {
+  const { board } = currentBoardAccess(res);
+  const taskId = req.params.taskId as string;
+  await findBoardTask(board.id, taskId);
+
+  const comments = await prisma.comment.findMany({
+    where: { taskId },
+    select: commentSelect,
+    orderBy: { createdAt: 'asc' },
+  });
+  res.json({ comments: comments.map(commentJson) });
+});
+
+boardContentRouter.post(
+  '/tasks/:taskId/comments',
+  requireBoardAccess('EDITOR'),
+  async (req, res) => {
+    const { content } = parseBody(commentSchema, req);
+    const { board } = currentBoardAccess(res);
+    const actorId = currentUserId(res);
+    const taskId = req.params.taskId as string;
+    await findBoardTask(board.id, taskId);
+
+    const comment = await prisma.comment.create({
+      data: { taskId, authorId: actorId, content },
+      select: commentSelect,
+    });
+    await recordAudit({
+      boardId: board.id,
+      actorId,
+      action: 'COMMENT_ADDED',
+      entityType: 'comment',
+      entityId: comment.id,
+      metadata: { taskId },
+    });
+
+    res.status(201).json({ comment: commentJson(comment) });
+  },
+);
+
+boardContentRouter.delete(
+  '/tasks/:taskId/comments/:commentId',
+  requireBoardAccess('EDITOR'),
+  async (req, res) => {
+    const { board } = currentBoardAccess(res);
+    const comment = await prisma.comment.findFirst({
+      where: {
+        id: req.params.commentId as string,
+        task: { column: { boardId: board.id } },
+      },
+      select: { id: true },
+    });
+    if (!comment) {
+      throw new HttpError(404, 'COMMENT_NOT_FOUND', 'Comment not found');
+    }
+
+    await prisma.comment.delete({ where: { id: comment.id } });
+    res.status(204).end();
   },
 );
