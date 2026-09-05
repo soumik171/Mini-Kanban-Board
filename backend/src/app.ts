@@ -60,9 +60,15 @@ export function buildApp(): express.Express {
   app.use(helmet());
 
   // Rate limits run before body parsing so throttled clients never cost
-  // parsing work; /health stays unlimited.
+  // parsing work; /health stays unlimited. The strict auth limiter guards the
+  // credential/token endpoints only - /me and the realtime /stream verify
+  // signed tokens or memberships instead of guessing secrets, and a long-lived
+  // stream must never be able to exhaust (or be exhausted by) the login
+  // budget via EventSource auto-reconnects.
   app.use('/api', apiLimiter);
-  app.use('/api/auth', authLimiter);
+  app.use('/api/auth/login', authLimiter);
+  app.use('/api/auth/register', authLimiter);
+  app.use('/api/auth/refresh', authLimiter);
 
   app.use(express.json({ limit: '100kb' }));
   app.use(cookieParser());

@@ -103,6 +103,15 @@ export function setAccessToken(token: string | null): void {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
+/**
+ * URL for a board's realtime SSE stream. EventSource cannot set an
+ * Authorization header, so the stream authenticates with the refresh cookie,
+ * which is path-scoped to /api/auth - hence the endpoint lives there.
+ */
+export function eventStreamUrl(boardId: string): string {
+  return `${API_BASE}/api/auth/stream?boardId=${encodeURIComponent(boardId)}`;
+}
+
 interface ErrorBody {
   error?: { code?: string; message?: string };
 }

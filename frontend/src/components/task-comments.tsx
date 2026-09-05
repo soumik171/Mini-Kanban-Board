@@ -15,10 +15,13 @@ export function TaskComments({
   boardId,
   taskId,
   canEdit,
+  refreshKey = 0,
 }: {
   boardId: string;
   taskId: string;
   canEdit: boolean;
+  /** Bumped by the parent when a live comment event targets this task. */
+  refreshKey?: number;
 }) {
   const [comments, setComments] = useState<CommentItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,7 +39,7 @@ export function TaskComments({
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boardId, taskId]);
+  }, [boardId, taskId, refreshKey]);
 
   async function handlePost() {
     const trimmed = content.trim();

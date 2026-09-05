@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
   ApiError,
@@ -14,10 +14,44 @@ import {
 import { PRIORITY_ORDER, PRIORITY_STYLES, initials } from "@/lib/format";
 import { TaskComments } from "./task-comments";
 
+/** The editable content of a task, in dialog form. */
+interface Content {
+  title: string;
+  description: string;
+  priority: Priority;
+  dueDate: string; // "YYYY-MM-DD" or ""
+  labels: string[];
+  assigneeId: string | null;
+}
+
+function contentOf(task: Task): Content {
+  return {
+    title: task.title,
+    description: task.description ?? "",
+    priority: task.priority,
+    dueDate: task.dueDate ? task.dueDate.slice(0, 10) : "",
+    labels: task.labels,
+    assigneeId: task.assignee?.id ?? null,
+  };
+}
+
+function sameContent(a: Content, b: Content): boolean {
+  return (
+    a.title === b.title &&
+    a.description === b.description &&
+    a.priority === b.priority &&
+    a.dueDate === b.dueDate &&
+    a.assigneeId === b.assigneeId &&
+    a.labels.length === b.labels.length &&
+    a.labels.every((label, index) => label === b.labels[index])
+  );
+}
+
 export function TaskDialog({
   boardId,
   task,
   canEdit,
+  commentsRefreshKey = 0,
   onSaved,
   onDeleted,
   onClose,
@@ -25,6 +59,8 @@ export function TaskDialog({
   boardId: string;
   task: Task;
   canEdit: boolean;
+  /** Bumped when a live comment lands on this task while the dialog is open. */
+  commentsRefreshKey?: number;
   onSaved(): void;
   onDeleted(): void;
   onClose(): void;
@@ -39,6 +75,36 @@ export function TaskDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  // Realtime sync: the dialog shows the freshest copy of the task (the parent
+  // re-derives `task` from each board snapshot). When the server copy changes
+  // — a teammate's edit arriving over the live stream — adopt it, but only if
+  // the form still matches the last snapshot, i.e. no in-progress local edit
+  // would be clobbered.
+  const serverContentRef = useRef<Content>(contentOf(task));
+  useEffect(() => {
+    const latest = contentOf(task);
+    if (sameContent(latest, serverContentRef.current)) return;
+    const draft = {
+      title,
+      description,
+      priority,
+      dueDate,
+      labels: labels
+        .split(",")
+        .map((label) => label.trim())
+        .filter(Boolean),
+      assigneeId: assigneeId || null,
+    } satisfies Content;
+    if (!sameContent(draft, serverContentRef.current)) return; // local edits win
+    serverContentRef.current = latest;
+    setTitle(latest.title);
+    setDescription(latest.description);
+    setPriority(latest.priority);
+    setDueDate(latest.dueDate);
+    setLabels(latest.labels.join(", "));
+    setAssigneeId(latest.assigneeId ?? "");
+  }, [task, title, description, priority, dueDate, labels, assigneeId]);
 
   useEffect(() => {
     void listMembers(boardId)
@@ -254,7 +320,12 @@ export function TaskDialog({
             <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
           ) : null}
 
-          <TaskComments boardId={boardId} taskId={task.id} canEdit={canEdit} />
+          <TaskComments
+            boardId={boardId}
+            taskId={task.id}
+            canEdit={canEdit}
+            refreshKey={commentsRefreshKey}
+          />
 
           <div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-4">
             {canEdit ? (

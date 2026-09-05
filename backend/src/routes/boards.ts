@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 import { recordAudit } from '../lib/audit.js';
+import { dropBoardSubscribers, publishToBoard } from '../lib/realtime.js';
 import { HttpError } from '../lib/http-error.js';
 import { prisma } from '../lib/prisma.js';
 import { parseBody } from '../lib/validation.js';
@@ -295,6 +296,10 @@ boardsRouter.delete('/:boardId', requireBoardAccess('OWNER'), async (_req, res) 
   // Deleting the board cascades members, columns, tasks, comments, and the
   // board's audit history by design (AuditEvent.boardId is onDelete: Cascade).
   await prisma.board.delete({ where: { id: board.id } });
+
+  // Every live viewer is kicked off the now-gone board.
+  publishToBoard(board.id, 'deleted', { boardId: board.id });
+  dropBoardSubscribers(board.id);
   res.status(204).end();
 });
 

@@ -1,8 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useParams, useRouter } from "next/navigation";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type FormEvent,
+} from "react";
 
 import { ActivityPanel } from "@/components/activity-panel";
 import { AppHeader } from "@/components/app-header";
@@ -30,6 +38,7 @@ import {
   initials,
   isOverdue,
 } from "@/lib/format";
+import { useBoardStream, type BoardChangeEvent, type StreamStatus } from "@/lib/realtime";
 
 interface BoardState {
   board: BoardSummary;
@@ -57,13 +66,22 @@ export default function BoardPage() {
 
 function BoardContent() {
   const { boardId } = useParams<{ boardId: string }>();
+  const router = useRouter();
   const [detail, setDetail] = useState<BoardState | null>(null);
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [panel, setPanel] = useState<"activity" | "members" | null>(null);
+  const [commentsKey, setCommentsKey] = useState(0);
+
+  // Refs mirroring state the stream handler needs without re-creating
+  // callbacks: which task dialog is open, and whether a local move is in
+  // flight (its settle re-sync is authoritative; remote syncs defer meanwhile).
+  const selectedIdRef = useRef<string | null>(null);
+  const moveBusyRef = useRef(false);
+  const pendingSyncRef = useRef(false);
 
   const load = useCallback(async () => {
     if (!boardId) return;
@@ -72,6 +90,15 @@ function BoardContent() {
       setDetail(boardDetail);
       setColumns(cols);
       setError(null);
+      // The dialog is bound to a live task: if it no longer exists (deleted
+      // here or by a teammate), close it.
+      if (
+        selectedIdRef.current &&
+        !cols.some((col) => col.tasks.some((task) => task.id === selectedIdRef.current))
+      ) {
+        selectedIdRef.current = null;
+        setSelectedTaskId(null);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not load board");
     } finally {
@@ -79,11 +106,59 @@ function BoardContent() {
     }
   }, [boardId]);
 
+  // Realtime: refresh the board whenever any member changes it. Syncs defer
+  // while a local drag is mid-flight (the move's own settle re-syncs instead),
+  // so remote data never clobbers an optimistic drop in progress.
+  const syncFromRemote = useCallback(() => {
+    if (moveBusyRef.current) {
+      pendingSyncRef.current = true;
+      return;
+    }
+    void load();
+  }, [load]);
+
+  const handleStreamEvent = useCallback(
+    (event: BoardChangeEvent) => {
+      if (event.entityType === "comment") {
+        // Comment events don't alter columns; refresh the open task's thread.
+        const taskId =
+          typeof event.metadata?.taskId === "string" ? event.metadata.taskId : null;
+        if (taskId && taskId === selectedIdRef.current) {
+          setCommentsKey((key) => key + 1);
+        }
+        return;
+      }
+      syncFromRemote();
+    },
+    [syncFromRemote],
+  );
+
+  const handleStreamDeleted = useCallback(() => {
+    // The board is gone (deleted by its owner); leave for the board list.
+    void router.replace("/");
+  }, [router]);
+
+  const streamStatus = useBoardStream(boardId ?? null, {
+    onEvent: handleStreamEvent,
+    onDeleted: handleStreamDeleted,
+  });
+
   useEffect(() => {
     // Initial fetch: state updates happen only after the awaited request.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
+
+  // The dialog always renders the freshest copy of the task from the latest
+  // columns snapshot, so a teammate's edit flows into an open dialog.
+  const openTask = useMemo(() => {
+    if (!selectedTaskId) return null;
+    for (const column of columns) {
+      const task = column.tasks.find((candidate) => candidate.id === selectedTaskId);
+      if (task) return task;
+    }
+    return null;
+  }, [columns, selectedTaskId]);
 
   // Auto-dismiss transient action errors (e.g. a rejected move) after a few
   // seconds so a stale banner never lingers over a healthy board.
@@ -137,7 +212,10 @@ function BoardContent() {
             ) : null}
           </div>
           <div className="flex flex-col items-end gap-2">
-            <p className="text-xs text-slate-400">Owned by {detail.board.owner.name}</p>
+            <div className="flex items-center gap-2">
+              <StreamPill status={streamStatus} />
+              <p className="text-xs text-slate-400">Owned by {detail.board.owner.name}</p>
+            </div>
             <div className="flex gap-1.5">
               <button
                 type="button"
@@ -168,26 +246,32 @@ function BoardContent() {
         boardId={boardId ?? ""}
         columns={columns}
         canEdit={canEdit}
+        moveBusyRef={moveBusyRef}
+        pendingSyncRef={pendingSyncRef}
         onChanged={() => void load()}
         onColumnsChange={setColumns}
         onError={setActionError}
-        onOpenTask={setSelectedTask}
+        onOpenTask={(task) => {
+          selectedIdRef.current = task.id;
+          setSelectedTaskId(task.id);
+        }}
       />
 
-      {selectedTask ? (
+      {openTask ? (
         <TaskDialog
           boardId={boardId ?? ""}
-          task={selectedTask}
+          task={openTask}
           canEdit={canEdit}
+          commentsRefreshKey={commentsKey}
           onSaved={() => {
-            setSelectedTask(null);
+            setSelectedTaskId(null);
             void load();
           }}
           onDeleted={() => {
-            setSelectedTask(null);
+            setSelectedTaskId(null);
             void load();
           }}
-          onClose={() => setSelectedTask(null)}
+          onClose={() => setSelectedTaskId(null)}
         />
       ) : null}
 
@@ -216,6 +300,8 @@ function BoardColumnRow({
   boardId,
   columns,
   canEdit,
+  moveBusyRef,
+  pendingSyncRef,
   onChanged,
   onColumnsChange,
   onError,
@@ -224,6 +310,8 @@ function BoardColumnRow({
   boardId: string;
   columns: Column[];
   canEdit: boolean;
+  moveBusyRef: { current: boolean };
+  pendingSyncRef: { current: boolean };
   onChanged(): void;
   onColumnsChange(columns: Column[]): void;
   onError(message: string): void;
@@ -245,7 +333,8 @@ function BoardColumnRow({
   // is queued and processed after it settles. This keeps the optimistic board
   // from racing ahead of the server (which surfaced as
   // "beforeTaskId must be a task in the target column" 400s on quick drags).
-  const moveInFlight = useRef(false);
+  // The busy flag is shared with the parent so the realtime stream defers its
+  // syncs while a local optimistic move is mid-flight.
   const queuedDrop = useRef<{ taskId: string; target: HoverTarget } | null>(null);
 
   async function handleAddColumn(event: FormEvent) {
@@ -271,7 +360,7 @@ function BoardColumnRow({
     const taskId = dragging.taskId;
     setDragging(null);
     setHover(null);
-    if (moveInFlight.current) {
+    if (moveBusyRef.current) {
       queuedDrop.current = { taskId, target };
       return;
     }
@@ -282,7 +371,7 @@ function BoardColumnRow({
   // success or failure the columns are re-fetched so the board always mirrors
   // the server (fresh data is authoritative; no stale snapshot restore).
   async function runMove(taskId: string, target: HoverTarget) {
-    moveInFlight.current = true;
+    moveBusyRef.current = true;
     const before = columnsRef.current;
     const next = applyMove(before, taskId, target.columnId, target.beforeTaskId);
     if (next !== before) {
@@ -298,15 +387,18 @@ function BoardColumnRow({
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Could not move task");
     } finally {
-      moveInFlight.current = false;
-      void onChanged();
       const nextQueued = queuedDrop.current;
       queuedDrop.current = null;
-      // Only a move that the server accepted can be the basis for a queued
-      // follow-up drop; a rejected move is rolled back by the refetch above.
       if (nextQueued && succeeded) {
+        // Chain the queued drop; the busy flag stays raised throughout.
         void runMove(nextQueued.taskId, nextQueued.target);
+        return;
       }
+      moveBusyRef.current = false;
+      // Any remote sync deferred while this move was in flight is now served
+      // by the authoritative refetch below.
+      pendingSyncRef.current = false;
+      void onChanged();
     }
   }
 
@@ -737,6 +829,22 @@ function nextTaskId(task: Task, tasks: Task[]): string | null {
 
 function DropLine() {
   return <div className="h-0.5 rounded-full bg-indigo-500" />;
+}
+
+function StreamPill({ status }: { status: StreamStatus }) {
+  const live = status === "live";
+  const label =
+    status === "live" ? "Live" : status === "connecting" ? "Connecting…" : "Reconnecting…";
+  const dot = live ? "bg-emerald-500" : status === "connecting" ? "bg-amber-400" : "bg-slate-400";
+  return (
+    <span
+      title="Realtime updates from other members"
+      className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-500"
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${dot} ${live ? "animate-pulse" : ""}`} />
+      {label}
+    </span>
+  );
 }
 
 function TaskCard({

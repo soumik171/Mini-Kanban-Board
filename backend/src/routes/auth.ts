@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 import { HttpError } from '../lib/http-error.js';
 import { prisma } from '../lib/prisma.js';
+import { subscribeToBoard } from '../lib/realtime.js';
 import {
   clearRefreshCookie,
   REFRESH_COOKIE,
@@ -105,6 +106,66 @@ authRouter.post('/logout', (req, res) => {
   assertSameOrigin(req);
   clearRefreshCookie(res);
   res.status(204).end();
+});
+
+// Live board stream (Server-Sent Events). EventSource cannot send an
+// Authorization header, and the refresh cookie is deliberately path-scoped to
+// /api/auth - so the stream lives here, authenticating via that cookie.
+// Subscribers receive `change` events broadcast by recordAudit whenever any
+// member mutates the board, plus a `connected` event on handshake and a
+// `deleted` event if the board itself is removed.
+authRouter.get('/stream', async (req, res) => {
+  const token = (req.cookies?.[REFRESH_COOKIE] as string | undefined) ?? '';
+  if (!token) {
+    throw new HttpError(401, 'UNAUTHORIZED', 'Missing refresh token');
+  }
+  const userId = verifyRefreshToken(token);
+
+  const boardId = req.query.boardId;
+  if (typeof boardId !== 'string' || boardId.length === 0) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'boardId query parameter is required');
+  }
+
+  // Only board members may watch a board's stream.
+  const board = await prisma.board.findUnique({
+    where: { id: boardId },
+    select: { id: true, ownerId: true },
+  });
+  if (!board) {
+    throw new HttpError(404, 'BOARD_NOT_FOUND', 'Board not found');
+  }
+  if (board.ownerId !== userId) {
+    const member = await prisma.boardMember.findUnique({
+      where: { boardId_userId: { boardId, userId } },
+      select: { id: true },
+    });
+    if (!member) {
+      throw new HttpError(403, 'FORBIDDEN', 'You do not have access to this board');
+    }
+  }
+
+  // All checks pass: commit to the streaming response.
+  res.status(200);
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    // Ask proxies (and the Next.js dev rewrite) not to buffer the stream.
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders();
+  res.write(`event: connected\ndata: ${JSON.stringify({ boardId })}\n\n`);
+
+  // Keep the connection alive past idle proxy timeouts.
+  const heartbeat = setInterval(() => {
+    res.write(': ping\n\n');
+  }, 25000);
+
+  const unsubscribe = subscribeToBoard(boardId, res);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
 });
 
 authRouter.get('/me', requireAuth, async (_req, res) => {

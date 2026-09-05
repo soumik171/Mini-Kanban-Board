@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { Router } from 'express';
 import { z } from 'zod';
 
-import { recordAudit } from '../lib/audit.js';
+import { broadcastBoardChange, recordAudit } from '../lib/audit.js';
 import { HttpError } from '../lib/http-error.js';
 import { prisma } from '../lib/prisma.js';
 import { parseBody } from '../lib/validation.js';
@@ -582,13 +582,24 @@ boardContentRouter.delete(
         id: req.params.commentId as string,
         task: { column: { boardId: board.id } },
       },
-      select: { id: true },
+      select: { id: true, taskId: true },
     });
     if (!comment) {
       throw new HttpError(404, 'COMMENT_NOT_FOUND', 'Comment not found');
     }
 
     await prisma.comment.delete({ where: { id: comment.id } });
+
+    // Comment deletion is deliberately not persisted to the activity feed,
+    // but open dialogs still need to drop the comment live.
+    broadcastBoardChange(board.id, {
+      id: `comment-deleted:${comment.id}`,
+      action: 'COMMENT_DELETED',
+      entityType: 'comment',
+      entityId: comment.id,
+      metadata: { taskId: comment.taskId },
+      actorId: currentUserId(res),
+    });
     res.status(204).end();
   },
 );
