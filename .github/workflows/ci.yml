@@ -36,13 +36,7 @@ jobs:
           cache-dependency-path: backend/package-lock.json
 
       - name: Install dependencies
-        run: |
-          npm install
-          # vitest 4.x uses rolldown which has optional native bindings that
-          # npm sometimes skips on Linux (npm cli issue #4828). Reinstalling
-          # after a clean ensures the Linux rolldown binding is present.
-          rm -rf node_modules/.vite node_modules/.prisma
-          npm install
+        run: npm install
 
       - name: Generate Prisma client
         run: npx prisma generate
