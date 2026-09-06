@@ -49,9 +49,12 @@ export function buildApp(): express.Express {
   // responses with credentials (the refresh cookie is HttpOnly). The
   // callback form is used deliberately - a plain string origin is echoed
   // unconditionally, while this reflects it only for allowed origins.
+  // Normalize the incoming origin by stripping any trailing slash so the
+  // comparison matches even when CLIENT_ORIGIN was entered with one.
   app.use(
     cors({
-      origin: (origin, callback) => callback(null, origin === env.clientOrigin),
+      origin: (origin, callback) =>
+        callback(null, origin?.replace(/\/+$/, '') === env.clientOrigin),
       credentials: true,
     }),
   );

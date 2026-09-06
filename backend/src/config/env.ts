@@ -37,7 +37,10 @@ export const env = {
   isProd,
   // Vitest injects PORT=0 into workers; tests bind their own ephemeral ports.
   port: nodeEnv === 'test' ? DEFAULT_PORT : parsePort(process.env.PORT),
-  clientOrigin: process.env.CLIENT_ORIGIN ?? 'http://localhost:3000',
+  // Normalize: strip trailing slash so comparisons work regardless of how the
+  // env var was entered (browsers send Origin without a trailing slash).
+  clientOrigin:
+    (process.env.CLIENT_ORIGIN ?? 'http://localhost:3000').replace(/\/+$/, ''),
   jwtAccessSecret: secret('JWT_ACCESS_SECRET', 'dev-only-access-secret-change-me'),
   jwtRefreshSecret: secret('JWT_REFRESH_SECRET', 'dev-only-refresh-secret-change-me'),
   accessTokenTtlSeconds: 15 * 60,

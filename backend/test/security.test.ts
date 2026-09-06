@@ -117,8 +117,10 @@ describe('security hardening', () => {
     const row = rows.find((r) => r.startsWith('refreshToken='));
     expect(row).toBeDefined();
     expect(row).toContain('HttpOnly');
+    // In development (test env) the cookie is SameSite=Lax and scoped to the
+    // root path so it survives proxy/rewrite path reshaping.
     expect(row).toContain('SameSite=Lax');
-    expect(row).toContain('Path=/api/auth');
+    expect(row).toContain('Path=/');
   });
 
   it('rejects tampered or cross-type tokens with 401 UNAUTHORIZED', async () => {

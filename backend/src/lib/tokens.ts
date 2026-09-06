@@ -13,9 +13,14 @@ interface TokenPayload {
 
 const refreshCookieBase = {
   httpOnly: true,
-  sameSite: 'lax' as const,
+  // 'none' + secure is required for cross-domain cookie transport: the Vercel
+  // frontend (vercel.app) and the Render backend live on different sites, so a
+  // lax cookie would be withheld on the /api/auth/refresh POST.
+  sameSite: env.isProd ? ('none' as const) : ('lax' as const),
   secure: env.isProd,
-  path: '/api/auth',
+  // Widen to root path so the cookie is always sent back regardless of how
+  // proxies or rewrites reshape the URL path.
+  path: '/',
 };
 
 const REFRESH_COOKIE_OPTIONS = {
@@ -61,5 +66,5 @@ export function setRefreshCookie(res: Response, token: string): void {
 }
 
 export function clearRefreshCookie(res: Response): void {
-  res.clearCookie(REFRESH_COOKIE, refreshCookieBase);
+  res.clearCookie(REFRESH_COOKIE, { ...refreshCookieBase, maxAge: 0 });
 }

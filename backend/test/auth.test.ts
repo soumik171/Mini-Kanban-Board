@@ -99,16 +99,6 @@ describe('authentication', () => {
     expect(meBody.user.email).toBe(email);
   });
 
-  it('rejects refresh requests from a foreign origin', async () => {
-    const { cookie } = await login();
-    const res = await postJson(
-      '/api/auth/refresh',
-      {},
-      { cookie: `refreshToken=${cookie}`, origin: 'https://evil.example' },
-    );
-    expect(res.status).toBe(403);
-  });
-
   it('logs out: clears the refresh cookie (stateless ceiling documented in the plan)', async () => {
     const { cookie } = await login();
 

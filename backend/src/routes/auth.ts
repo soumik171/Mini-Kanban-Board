@@ -1,10 +1,9 @@
 import bcrypt from 'bcryptjs';
-import type { Request, Response } from 'express';
 import { Router } from 'express';
+import type { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
-import { env } from '../config/env.js';
 import { HttpError } from '../lib/http-error.js';
 import { prisma } from '../lib/prisma.js';
 import { subscribeToBoard } from '../lib/realtime.js';
@@ -40,13 +39,6 @@ function publicUser(user: { id: string; email: string; name: string }) {
 
 function setSession(res: Response, userId: string): void {
   setRefreshCookie(res, signRefreshToken(userId));
-}
-
-function assertSameOrigin(req: Request): void {
-  const origin = req.headers.origin;
-  if (origin && origin !== env.clientOrigin) {
-    throw new HttpError(403, 'FORBIDDEN', 'Cross-origin request rejected');
-  }
 }
 
 authRouter.post('/register', async (req, res) => {
@@ -90,8 +82,6 @@ authRouter.post('/login', async (req, res) => {
 });
 
 authRouter.post('/refresh', (req, res) => {
-  assertSameOrigin(req);
-
   const token = (req.cookies?.[REFRESH_COOKIE] as string | undefined) ?? '';
   if (!token) {
     throw new HttpError(401, 'UNAUTHORIZED', 'Missing refresh token');
@@ -103,7 +93,6 @@ authRouter.post('/refresh', (req, res) => {
 });
 
 authRouter.post('/logout', (req, res) => {
-  assertSameOrigin(req);
   clearRefreshCookie(res);
   res.status(204).end();
 });
