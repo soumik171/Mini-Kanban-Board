@@ -119,7 +119,8 @@ Create a new Web Service on https://render.com and connect the GitHub repository
 - **Name:** choose any name (for example `mini-kanban-api`).
 - **Root Directory:** `backend` — this tells Render to build and run from the `backend` directory.
 - **Environment:** `Node`.
-- **Build Command:** `npm run build && npx prisma migrate deploy`.
+- **Build Command:** `npm run build && npx prisma migrate deploy && npx prisma db seed`.
+  - The seed step is what keeps the demo data current (see the notes below). The seed is idempotent: it creates the demo users/board if they are missing, tops an existing demo board up to the five-column layout, and never deletes or duplicates cards you created. Running it on every deploy means the live demo reflects demo-content changes automatically.
 - **Start Command:** `node dist/index.js`.
 - **Plan:** Free.
 
@@ -155,14 +156,15 @@ Once the frontend URL from step 3 is known, update the backend's `CLIENT_ORIGIN`
 
 #### 5. Seed the deployed database
 
-The deployed database starts empty. Seed it once so the live link shows the demo board:
+The database (and its rows) live in Neon — **not** in Git. Pushing code never changes a database; the seed script is what populates it. With the build command above, the seed now runs automatically on every Render deploy, so a fresh database is created and an older one is upgraded in place.
+
+To update an already-seeded database right now (for example, when the seed gained the `Backlog` and `Review` columns), run the seed once against the Neon connection string. From `backend`:
 
 ```bash
-cd backend
-# Point DATABASE_URL at the Neon database, then:npm run db:seed
+DATABASE_URL="postgresql://USER:PASSWORD@HOST.neon.tech/DBNAME?sslmode=require" npx prisma db seed
 ```
 
-You can run this from your local machine with the Neon `DATABASE_URL`, or from Render's dashboard if a one-off command is available. The seed is idempotent, so running it again is safe.
+Or from Render's shell if one is available. The seed is idempotent — running it again only fills in what is missing and is safe to repeat.
 
 #### 6. Test the live link
 

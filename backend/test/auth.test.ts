@@ -109,6 +109,20 @@ describe('authentication', () => {
     expect(refreshCookieFrom(logoutRes)).toBe('');
   });
 
+  it('clears refresh cookies at both the root and the legacy /api/auth path', async () => {
+    const { cookie } = await login();
+
+    const logoutRes = await postJson('/api/auth/logout', {}, { cookie: `refreshToken=${cookie}` });
+    const headers = logoutRes.headers as Headers & { getSetCookie?: () => string[] };
+    const setCookies =
+      typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : [];
+    // Express expires the cookie by emptying its value and back-dating it.
+    const deletions = setCookies.filter((row) => row.startsWith('refreshToken=;'));
+    expect(deletions).toHaveLength(2);
+    expect(deletions.some((row) => row.includes('Path=/' ))).toBe(true);
+    expect(deletions.some((row) => row.includes('Path=/api/auth'))).toBe(true);
+  });
+
   it('rejects requests without a valid access token', async () => {
     const res = await fetch(`${baseUrl}/api/auth/me`);
     expect(res.status).toBe(401);

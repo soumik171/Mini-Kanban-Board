@@ -66,5 +66,11 @@ export function setRefreshCookie(res: Response, token: string): void {
 }
 
 export function clearRefreshCookie(res: Response): void {
-  res.clearCookie(REFRESH_COOKIE, { ...refreshCookieBase, maxAge: 0 });
+  // Remove the current root-path cookie AND any cookie older deployments set
+  // at /api/auth. Browsers keep both until each is deleted; if a stale one
+  // survives sign-out, the next /api/auth/refresh resurrects the session on
+  // page load (logout appeared to fail on the deployed app).
+  for (const path of ['/', '/api/auth'] as const) {
+    res.clearCookie(REFRESH_COOKIE, { ...refreshCookieBase, path, maxAge: 0 });
+  }
 }
