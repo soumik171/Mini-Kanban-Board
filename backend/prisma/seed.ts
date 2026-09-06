@@ -1,12 +1,14 @@
 /**
- * Development seed: creates two demo accounts and a shared "Demo Kanban"
- * board pre-populated with five columns (Backlog, To Do, In Progress,
- * Review, Done), tasks, comments, and a realistic audit trail.
+ * Development seed: creates two demo accounts and a shared
+ * "E-Commerce Customer Portal" board pre-populated with five columns
+ * (Backlog, To Do, In Progress, Review, Done), tasks, comments, and a
+ * realistic audit trail.
  *
  * Run with: npm run db:seed (idempotent). If the demo board is missing it is
  * created from scratch; if it already exists (e.g. from an older seed with
  * three columns) it is upgraded in place to the five-column layout without
- * touching tasks the user added themselves.
+ * touching tasks the user added themselves. A board created under the old
+ * "Demo Kanban" name is renamed in place rather than duplicated.
  */
 import type { Prisma } from '@prisma/client';
 import bcrypt from 'bcryptjs';
@@ -15,6 +17,10 @@ import { recordAudit } from '../src/lib/audit.js';
 import { prisma } from '../src/lib/prisma.js';
 
 const DEMO_PASSWORD = 'demo-password-1';
+const DEMO_BOARD_TITLE = 'E-Commerce Customer Portal';
+const LEGACY_DEMO_BOARD_TITLE = 'Demo Kanban';
+const DEMO_BOARD_DESCRIPTION =
+  'Customer-facing portal for the e-commerce storefront — tracking design, backend, and launch work.';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const daysFromNow = (days: number): Date => new Date(Date.now() + days * DAY_MS);
 
@@ -217,12 +223,25 @@ async function main() {
     },
   ];
 
+  // Find the demo board under its current or legacy name so an existing
+  // database (local or live) is renamed in place instead of gaining a second
+  // demo board.
   const existingBoard = await prisma.board.findFirst({
-    where: { title: 'Demo Kanban', ownerId: demo.id },
-    select: { id: true },
+    where: {
+      ownerId: demo.id,
+      OR: [{ title: DEMO_BOARD_TITLE }, { title: LEGACY_DEMO_BOARD_TITLE }],
+    },
+    select: { id: true, title: true },
   });
   if (existingBoard) {
-    console.log('Demo board "Demo Kanban" already exists — upgrading to five columns.');
+    if (existingBoard.title !== DEMO_BOARD_TITLE) {
+      await prisma.board.update({
+        where: { id: existingBoard.id },
+        data: { title: DEMO_BOARD_TITLE, description: DEMO_BOARD_DESCRIPTION },
+      });
+      console.log(`  • renamed demo board "${existingBoard.title}" → "${DEMO_BOARD_TITLE}"`);
+    }
+    console.log(`Demo board "${DEMO_BOARD_TITLE}" already exists — upgrading to five columns.`);
     const { backlog, review, done } = await ensureDemoColumns(existingBoard.id, demo.id);
 
     // Fill newly available columns with a few sample cards when they are
@@ -266,12 +285,12 @@ async function main() {
   // Board + sharing.
   const board = await prisma.board.create({
     data: {
-      title: 'Demo Kanban',
-      description: 'Sample board for exploring the mini kanban app',
+      title: DEMO_BOARD_TITLE,
+      description: DEMO_BOARD_DESCRIPTION,
       ownerId: demo.id,
     },
   });
-  console.log(`  • created board "Demo Kanban" (${board.id})`);
+  console.log(`  • created board "${DEMO_BOARD_TITLE}" (${board.id})`);
   await recordAudit({
     boardId: board.id,
     actorId: demo.id,
