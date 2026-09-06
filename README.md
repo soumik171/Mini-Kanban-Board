@@ -330,6 +330,16 @@ For a fully self-contained deployment, the remaining work is to add a frontend s
 └── README.md
 ```
 
+## Security notes
+
+The project's dependencies are checked with `npm audit` as part of ordinary maintenance. A run of `npm audit` currently reports three high-severity advisories, all originating from `deepmerge-ts`, a transitive dependency of Prisma used internally for configuration merging. The underlying issue is stack exhaustion when merging deeply recursive object graphs.
+
+In this application the vulnerable code path is not reachable through any user-facing API endpoint. Prisma uses the merge utility internally, and no API route accepts user input that is passed into Prisma's configuration merging. The practical risk in this specific application is therefore low.
+
+Addressing the advisories requires downgrading Prisma from 6.19.3 to 6.12.0 via `npm audit fix --force`, which is a breaking change that would need the Prisma client to be regenerated and the schema revalidated. Given the low practical risk and the cost of a breaking Prisma downgrade, the advisories are left in place with this note rather than patched.
+
+If a future Prisma release ships a fix on a non-breaking upgrade path, it should be applied as part of ordinary dependency maintenance.
+
 ## License
 
 This project is a personal portfolio exercise and is shared as-is.
