@@ -129,4 +129,47 @@ describe('authentication', () => {
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe('UNAUTHORIZED');
   });
+
+  it('updates the profile name and returns the new public profile', async () => {
+    const { cookie } = await login();
+    const refreshRes = await postJson('/api/auth/refresh', {}, { cookie: `refreshToken=${cookie}` });
+    const { accessToken } = (await refreshRes.json()) as { accessToken: string };
+
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ name: 'Updated Name' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { id: string; email: string; name: string } };
+    expect(body.user).toEqual({ id: expect.any(String), email, name: 'Updated Name' });
+  });
+
+  it('rejects an empty or whitespace-only profile name', async () => {
+    const { cookie } = await login();
+    const refreshRes = await postJson('/api/auth/refresh', {}, { cookie: `refreshToken=${cookie}` });
+    const { accessToken } = (await refreshRes.json()) as { accessToken: string };
+
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ name: '   ' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects updating the profile without a valid token', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/me`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Nope' }),
+    });
+    expect(res.status).toBe(401);
+  });
 });

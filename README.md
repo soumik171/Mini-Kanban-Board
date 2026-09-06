@@ -253,6 +253,7 @@ The backend exposes a JSON API. All authenticated routes expect either a Bearer 
 - `POST /api/auth/refresh` — rotate the refresh cookie and return a new access token
 - `POST /api/auth/logout` — clear the refresh cookie
 - `GET /api/auth/me` — return the current user from the access token
+- `PATCH /api/auth/me` — update the current user's display name
 - `GET /api/auth/stream?boardId=...` — Server-Sent Events stream for a board, authenticated via the refresh cookie
 
 ### Boards

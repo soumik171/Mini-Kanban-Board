@@ -234,6 +234,14 @@ export async function logout(): Promise<void> {
   }
 }
 
+export async function updateProfile(name: string): Promise<User> {
+  const { user } = await request<{ user: User }>("/api/auth/me", {
+    method: "PATCH",
+    body: { name },
+  });
+  return user;
+}
+
 // --------------------------------------------------------------- boards ---
 
 export async function listBoards(): Promise<ListedBoard[]> {

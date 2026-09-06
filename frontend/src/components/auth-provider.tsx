@@ -16,6 +16,7 @@ import {
   logout as apiLogout,
   refreshSession,
   register as apiRegister,
+  updateProfile,
   type User,
 } from "@/lib/api";
 
@@ -25,6 +26,7 @@ interface AuthContextValue {
   login(email: string, password: string): Promise<void>;
   register(name: string, email: string, password: string): Promise<void>;
   logout(): Promise<void>;
+  updateName(name: string): Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -66,9 +68,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const updateName = useCallback(async (name: string) => {
+    const updated = await updateProfile(name);
+    setUser(updated);
+  }, []);
+
   const value = useMemo(
-    () => ({ user, ready, login, register, logout }),
-    [user, ready, login, register, logout],
+    () => ({ user, ready, login, register, logout, updateName }),
+    [user, ready, login, register, logout, updateName],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -31,6 +31,10 @@ const loginSchema = z.object({
   password: z.string().min(1).max(128),
 });
 
+const updateProfileSchema = z.object({
+  name: z.string().trim().min(1, 'Name is required').max(80),
+});
+
 export const authRouter = Router();
 
 function publicUser(user: { id: string; email: string; name: string }) {
@@ -166,5 +170,17 @@ authRouter.get('/me', requireAuth, async (_req, res) => {
   if (!user) {
     throw new HttpError(401, 'UNAUTHORIZED', 'Account no longer exists');
   }
+  res.json({ user: publicUser(user) });
+});
+
+authRouter.patch('/me', requireAuth, async (req, res) => {
+  const { name } = parseBody(updateProfileSchema, req);
+  const userId = currentUserId(res);
+
+  const user = await prisma.user.update({
+    where: { id: userId },
+    data: { name },
+    select: { id: true, email: true, name: true },
+  });
   res.json({ user: publicUser(user) });
 });
