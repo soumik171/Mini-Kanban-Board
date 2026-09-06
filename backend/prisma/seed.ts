@@ -1,10 +1,14 @@
 /**
  * Development seed: creates two demo accounts and a shared "Demo Kanban"
- * board pre-populated with columns, tasks, comments, and a realistic audit
- * trail, so the UI phases have data to render from day one.
+ * board pre-populated with five columns (Backlog, To Do, In Progress,
+ * Review, Done), tasks, comments, and a realistic audit trail.
  *
- * Run with: npm run db:seed (idempotent - skips if the demo board exists)
+ * Run with: npm run db:seed (idempotent). If the demo board is missing it is
+ * created from scratch; if it already exists (e.g. from an older seed with
+ * three columns) it is upgraded in place to the five-column layout without
+ * touching tasks the user added themselves.
  */
+import type { Prisma } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 import { recordAudit } from '../src/lib/audit.js';
@@ -13,6 +17,19 @@ import { prisma } from '../src/lib/prisma.js';
 const DEMO_PASSWORD = 'demo-password-1';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const daysFromNow = (days: number): Date => new Date(Date.now() + days * DAY_MS);
+
+const COLUMN_ORDER = ['Backlog', 'To Do', 'In Progress', 'Review', 'Done'] as const;
+
+type DbColumn = { id: string; title: string };
+
+type TaskSeed = {
+  title: string;
+  description?: string;
+  priority?: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+  assigneeId?: string;
+  labels?: string[];
+  dueDate?: Date;
+};
 
 async function ensureUser(email: string, name: string) {
   const existing = await prisma.user.findUnique({ where: { email } });
@@ -26,18 +43,76 @@ async function ensureUser(email: string, name: string) {
   return user;
 }
 
+/**
+ * Makes sure the board has the canonical five columns, adding whatever is
+ * missing and renumbering them so they read left-to-right in kanban order.
+ * Existing columns and their tasks are never deleted or overwritten.
+ */
+async function ensureDemoColumns(
+  boardId: string,
+  actorId: string,
+): Promise<{ backlog: DbColumn | null; review: DbColumn | null; done: DbColumn | null }> {
+  const existing = await prisma.column.findMany({
+    where: { boardId },
+    orderBy: { position: 'asc' },
+    select: { id: true, title: true },
+  });
+  const byTitle = new Map(existing.map((column) => [column.title, column]));
+
+  const added: DbColumn[] = [];
+  for (const title of COLUMN_ORDER) {
+    if (byTitle.has(title)) continue;
+    const column = await prisma.column.create({
+      data: { boardId, title, position: 100 + added.length },
+    });
+    added.push(column);
+    byTitle.set(title, column);
+    await recordAudit({
+      boardId,
+      actorId,
+      action: 'COLUMN_CREATED',
+      entityType: 'column',
+      entityId: column.id,
+      metadata: { title },
+    });
+    console.log(`  • added column "${title}"`);
+  }
+
+  // Renumber so the canonical columns sit first in order, and any extra
+  // columns the user created on their own keep following after.
+  if (added.length > 0) {
+    const all = await prisma.column.findMany({
+      where: { boardId },
+      select: { id: true, title: true },
+    });
+    const canonical = new Set<string>(COLUMN_ORDER);
+    const order = [
+      ...COLUMN_ORDER,
+      ...all.map((column) => column.title).filter((title) => !canonical.has(title)),
+    ];
+    const updates: Prisma.PrismaPromise<unknown>[] = [];
+    for (const [index, title] of order.entries()) {
+      const column = all.find((candidate) => candidate.title === title);
+      if (!column) continue;
+      updates.push(
+        prisma.column.update({ where: { id: column.id }, data: { position: index + 1 } }),
+      );
+    }
+    await prisma.$transaction(updates);
+  }
+
+  const find = (title: string): DbColumn | null => {
+    const column = byTitle.get(title);
+    return column ? { id: column.id, title: column.title } : null;
+  };
+  return { backlog: find('Backlog'), review: find('Review'), done: find('Done') };
+}
+
 async function addTask(
   boardId: string,
   actorId: string,
   columnId: string,
-  input: {
-    title: string;
-    description?: string;
-    priority?: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
-    assigneeId?: string;
-    labels?: string[];
-    dueDate?: Date;
-  },
+  input: TaskSeed,
 ) {
   const last = await prisma.task.findFirst({
     where: { columnId },
@@ -68,16 +143,123 @@ async function addTask(
   return task;
 }
 
+/**
+ * Adds cards from `samples` to `column` until it holds at least `minimum`
+ * tasks. Existing cards (by title) are never duplicated, so running the seed
+ * again is safe. Used to keep every stage of the board visually balanced.
+ */
+async function ensureMinimumTasks(
+  boardId: string,
+  actorId: string,
+  column: DbColumn | null,
+  samples: TaskSeed[],
+  minimum: number,
+) {
+  if (!column) return;
+  const existing = await prisma.task.findMany({
+    where: { columnId: column.id },
+    select: { title: true },
+  });
+  const titles = new Set(existing.map((task) => task.title));
+  for (const sample of samples) {
+    if (titles.has(sample.title)) continue;
+    const count = await prisma.task.count({ where: { columnId: column.id } });
+    if (count >= minimum) break;
+    await addTask(boardId, actorId, column.id, sample);
+    titles.add(sample.title);
+  }
+}
+
 async function main() {
   const demo = await ensureUser('demo@test.com', 'Demo User');
   const teammate = await ensureUser('teammate@test.com', 'Teammate');
+
+  // Extra sample cards that keep the Review and Done columns populated too.
+  const reviewSamples: TaskSeed[] = [
+    {
+      title: 'Review drag-and-drop ghost PR',
+      description: 'Verify the flicker fix on Safari and with trackpad users.',
+      priority: 'HIGH',
+      assigneeId: demo.id,
+      labels: ['frontend', 'review'],
+      dueDate: daysFromNow(1),
+    },
+    {
+      title: 'Check activity feed on mobile',
+      description: 'Confirm the audit trail layout on narrow screens.',
+      priority: 'MEDIUM',
+      assigneeId: teammate.id,
+      labels: ['frontend', 'review'],
+      dueDate: daysFromNow(2),
+    },
+  ];
+  const doneSamples: TaskSeed[] = [
+    {
+      title: 'Email notifications',
+      description: 'Welcome email plus a digest for board activity.',
+      priority: 'MEDIUM',
+      assigneeId: teammate.id,
+      labels: ['backend'],
+    },
+    {
+      title: 'Rate limiting on auth routes',
+      description: 'Protect login and register endpoints from brute force.',
+      priority: 'HIGH',
+      assigneeId: demo.id,
+      labels: ['backend', 'infra'],
+    },
+    {
+      title: '404 page polish',
+      description: 'Friendly not-found page with a link back to boards.',
+      priority: 'LOW',
+      assigneeId: demo.id,
+      labels: ['frontend'],
+    },
+  ];
 
   const existingBoard = await prisma.board.findFirst({
     where: { title: 'Demo Kanban', ownerId: demo.id },
     select: { id: true },
   });
   if (existingBoard) {
-    console.log('Demo board "Demo Kanban" already exists — skipping.');
+    console.log('Demo board "Demo Kanban" already exists — upgrading to five columns.');
+    const { backlog, review, done } = await ensureDemoColumns(existingBoard.id, demo.id);
+
+    // Fill newly available columns with a few sample cards when they are
+    // empty, so every stage of the board feels populated.
+    if (backlog && (await prisma.task.count({ where: { columnId: backlog.id } })) === 0) {
+      await addTask(existingBoard.id, demo.id, backlog.id, {
+        title: 'Investigate realtime API alternatives',
+        description: 'Research connection limits and horizontal scaling for the live stream.',
+        priority: 'LOW',
+        labels: ['backend', 'infra'],
+        dueDate: daysFromNow(20),
+      });
+      await addTask(existingBoard.id, demo.id, backlog.id, {
+        title: 'Dark mode support',
+        description: 'Add a theme toggle and persist the preference per user.',
+        priority: 'LOW',
+        assigneeId: teammate.id,
+        labels: ['design', 'frontend'],
+        dueDate: daysFromNow(14),
+      });
+    }
+    if (review && (await prisma.task.count({ where: { columnId: review.id } })) === 0) {
+      await addTask(existingBoard.id, demo.id, review.id, {
+        title: 'Polish profile page',
+        description: 'Avatar upload, bio field, and responsive layout fixes.',
+        priority: 'MEDIUM',
+        assigneeId: demo.id,
+        labels: ['frontend'],
+        dueDate: daysFromNow(1),
+      });
+    }
+
+    // Balance the board: Review and Done get a few extra cards when needed.
+    await ensureMinimumTasks(existingBoard.id, demo.id, review, reviewSamples, 3);
+    await ensureMinimumTasks(existingBoard.id, demo.id, done, doneSamples, 4);
+
+    console.log('\nDone. Demo board is ready with all five columns balanced.');
     return;
   }
 
@@ -111,7 +293,7 @@ async function main() {
   });
 
   // Columns.
-  const columnDefs = ['To Do', 'In Progress', 'Done'] as const;
+  const columnDefs = ['Backlog', 'To Do', 'In Progress', 'Review', 'Done'] as const;
   const columns: { id: string; title: string }[] = [];
   for (const [index, title] of columnDefs.entries()) {
     const column = await prisma.column.create({
@@ -127,14 +309,31 @@ async function main() {
       metadata: { title, position: index + 1 },
     });
   }
-  const todo = columns[0];
-  const inProgress = columns[1];
-  const done = columns[2];
-  if (!todo || !inProgress || !done) {
+  const backlog = columns[0];
+  const todo = columns[1];
+  const inProgress = columns[2];
+  const review = columns[3];
+  const done = columns[4];
+  if (!backlog || !todo || !inProgress || !review || !done) {
     throw new Error('Failed to create demo columns');
   }
 
   // Tasks in each column.
+  await addTask(board.id, demo.id, backlog.id, {
+    title: 'Investigate WebSocket scaling',
+    description: 'Research connection limits and horizontal scaling options for the SSE stream.',
+    priority: 'LOW',
+    labels: ['backend', 'infra'],
+    dueDate: daysFromNow(20),
+  });
+  await addTask(board.id, demo.id, backlog.id, {
+    title: 'Dark mode support',
+    description: 'Add a theme toggle and persist the preference per user.',
+    priority: 'LOW',
+    assigneeId: teammate.id,
+    labels: ['design', 'frontend'],
+    dueDate: daysFromNow(14),
+  });
   await addTask(board.id, demo.id, todo.id, {
     title: 'Write API docs',
     description: 'Document every /api endpoint including roles and error codes.',
@@ -166,6 +365,21 @@ async function main() {
     assigneeId: demo.id,
     labels: ['backend', 'frontend'],
   });
+  await addTask(board.id, demo.id, inProgress.id, {
+    title: 'Keyboard shortcuts',
+    description: 'Escape closes dialogs, arrow keys move tasks, Ctrl+K searches.',
+    priority: 'MEDIUM',
+    assigneeId: teammate.id,
+    labels: ['frontend', 'accessibility'],
+  });
+  await addTask(board.id, demo.id, review.id, {
+    title: 'Profile page polish',
+    description: 'Avatar upload, bio field, and responsive layout fixes.',
+    priority: 'MEDIUM',
+    assigneeId: demo.id,
+    labels: ['frontend'],
+    dueDate: daysFromNow(1),
+  });
   await addTask(board.id, demo.id, done.id, {
     title: 'JWT authentication',
     description: 'Register, login, refresh tokens, and /me.',
@@ -179,6 +393,13 @@ async function main() {
     priority: 'MEDIUM',
     assigneeId: demo.id,
     labels: ['backend'],
+  });
+  await addTask(board.id, demo.id, done.id, {
+    title: 'Testing setup',
+    description: 'Vitest suite with factory helpers and an in-memory SQLite stage.',
+    priority: 'HIGH',
+    assigneeId: teammate.id,
+    labels: ['backend', 'tests'],
   });
 
   // Simulate a cross-column move for a richer feed: created in To Do, then
@@ -258,7 +479,11 @@ async function main() {
     metadata: { taskId: sharingUi.id },
   });
 
-  console.log('  • created 3 columns, 7 tasks, a cross-column move, and 2 comments');
+  // Keep every column visually populated on fresh installs too.
+  await ensureMinimumTasks(board.id, demo.id, review, reviewSamples, 3);
+  await ensureMinimumTasks(board.id, demo.id, done, doneSamples, 4);
+
+  console.log('  • created 5 columns, 15 tasks, a cross-column move, and 2 comments');
   console.log('\nDone. Demo board is ready and its activity feed is populated.');
 }
 

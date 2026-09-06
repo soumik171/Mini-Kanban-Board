@@ -4,10 +4,12 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
   ApiError,
+  createTask,
   deleteTask,
   listMembers,
   updateTask,
   type Member,
+  type NewTask,
   type Priority,
   type Task,
 } from "@/lib/api";
@@ -47,31 +49,46 @@ function sameContent(a: Content, b: Content): boolean {
   );
 }
 
+const FIELD_CLASS =
+  "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20";
+
+/**
+ * One dialog for both creating and editing a task so every popup looks and
+ * behaves the same. Pass `task` to edit an existing task; pass `task={null}`
+ * (with a `columnId`) to create a new one. Comments and Delete only exist for
+ * an already-saved task.
+ */
 export function TaskDialog({
   boardId,
   task,
+  columnId,
   canEdit,
   commentsRefreshKey = 0,
+  onCreated,
   onSaved,
   onDeleted,
   onClose,
 }: {
   boardId: string;
-  task: Task;
+  task: Task | null;
+  /** Column the new task should be created in (create mode only). */
+  columnId?: string;
   canEdit: boolean;
   /** Bumped when a live comment lands on this task while the dialog is open. */
   commentsRefreshKey?: number;
+  /** Called after a new task is created; leave unset in edit mode. */
+  onCreated?(): void;
   onSaved(): void;
   onDeleted(): void;
   onClose(): void;
 }) {
   const [members, setMembers] = useState<Member[]>([]);
-  const [title, setTitle] = useState(task.title);
-  const [description, setDescription] = useState(task.description ?? "");
-  const [priority, setPriority] = useState<Priority>(task.priority);
-  const [dueDate, setDueDate] = useState(task.dueDate ? task.dueDate.slice(0, 10) : "");
-  const [labels, setLabels] = useState(task.labels.join(", "));
-  const [assigneeId, setAssigneeId] = useState(task.assignee?.id ?? "");
+  const [title, setTitle] = useState(task?.title ?? "");
+  const [description, setDescription] = useState(task?.description ?? "");
+  const [priority, setPriority] = useState<Priority>(task?.priority ?? "MEDIUM");
+  const [dueDate, setDueDate] = useState(task?.dueDate ? task.dueDate.slice(0, 10) : "");
+  const [labels, setLabels] = useState(task?.labels.join(", ") ?? "");
+  const [assigneeId, setAssigneeId] = useState(task?.assignee?.id ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -80,11 +97,12 @@ export function TaskDialog({
   // re-derives `task` from each board snapshot). When the server copy changes
   // — a teammate's edit arriving over the live stream — adopt it, but only if
   // the form still matches the last snapshot, i.e. no in-progress local edit
-  // would be clobbered.
-  const serverContentRef = useRef<Content>(contentOf(task));
+  // would be clobbered. No-op while creating a brand-new task.
+  const serverContentRef = useRef<Content | null>(task ? contentOf(task) : null);
   useEffect(() => {
+    if (!task) return;
     const latest = contentOf(task);
-    if (sameContent(latest, serverContentRef.current)) return;
+    if (sameContent(latest, serverContentRef.current ?? latest)) return;
     const draft = {
       title,
       description,
@@ -96,7 +114,7 @@ export function TaskDialog({
         .filter(Boolean),
       assigneeId: assigneeId || null,
     } satisfies Content;
-    if (!sameContent(draft, serverContentRef.current)) return; // local edits win
+    if (!sameContent(draft, serverContentRef.current ?? draft)) return; // local edits win
     serverContentRef.current = latest;
     setTitle(latest.title);
     setDescription(latest.description);
@@ -120,7 +138,23 @@ export function TaskDialog({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
-  async function handleSave(event: FormEvent) {
+  function buildPayload(trimmedTitle: string): NewTask {
+    return {
+      title: trimmedTitle,
+      description: description.trim() || null,
+      priority,
+      // The date input yields "YYYY-MM-DD"; the API requires a full
+      // ISO 8601 datetime (z.string().datetime({ offset: true })).
+      dueDate: dueDate ? `${dueDate}T00:00:00.000Z` : null,
+      labels: labels
+        .split(",")
+        .map((label) => label.trim())
+        .filter(Boolean),
+      assigneeId: assigneeId || null,
+    };
+  }
+
+  async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
     const trimmedTitle = title.trim();
@@ -131,21 +165,18 @@ export function TaskDialog({
     setBusy(true);
     setError(null);
     try {
-      await updateTask(boardId, task.id, {
-        title: trimmedTitle,
-        description: description.trim() || null,
-        priority,
-        // The date input yields "YYYY-MM-DD"; the API requires a full
-        // ISO 8601 datetime (z.string().datetime({ offset: true })).
-        dueDate: dueDate ? `${dueDate}T00:00:00.000Z` : null,
-        labels: labels
-          .split(",")
-          .map((label) => label.trim())
-          .filter(Boolean),
-        assigneeId: assigneeId || null,
-      });
-      // Close on success so the board behind shows the saved values.
-      onSaved();
+      if (task) {
+        await updateTask(boardId, task.id, buildPayload(trimmedTitle));
+        // Close on success so the board behind shows the saved values.
+        onSaved();
+      } else {
+        if (!columnId) {
+          setError("Could not create the task");
+          return;
+        }
+        await createTask(boardId, columnId, buildPayload(trimmedTitle));
+        onCreated?.();
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save task");
     } finally {
@@ -159,7 +190,7 @@ export function TaskDialog({
       setConfirmingDelete(true);
       return;
     }
-    if (busy) return;
+    if (busy || !task) return;
     setBusy(true);
     setError(null);
     try {
@@ -180,25 +211,26 @@ export function TaskDialog({
       }}
     >
       <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white shadow-xl">
-        <form onSubmit={handleSave} className="flex flex-col gap-4 p-5">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4 p-5">
           <div className="flex items-start justify-between gap-3">
             {canEdit ? (
               <input
                 type="text"
+                autoFocus
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="Task title"
                 maxLength={200}
-                className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-base font-semibold text-slate-900 outline-none focus:border-indigo-500"
+                className={`${FIELD_CLASS} flex-1 text-base font-semibold text-slate-900`}
               />
             ) : (
-              <h2 className="text-lg font-semibold text-slate-900">{task.title}</h2>
+              <h2 className="text-lg font-semibold text-slate-900">{task?.title}</h2>
             )}
             <button
               type="button"
               onClick={onClose}
               aria-label="Close"
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
             >
               <svg viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
                 <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
@@ -235,10 +267,10 @@ export function TaskDialog({
                 onChange={(e) => setDescription(e.target.value)}
                 rows={3}
                 placeholder="Add a description…"
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                className={FIELD_CLASS}
               />
             </label>
-          ) : task.description ? (
+          ) : task?.description ? (
             <div>
               <span className="mb-1 block text-xs font-medium text-slate-500">Description</span>
               <p className="whitespace-pre-wrap text-sm text-slate-700">{task.description}</p>
@@ -253,7 +285,7 @@ export function TaskDialog({
                 value={dueDate}
                 disabled={!canEdit}
                 onChange={(e) => setDueDate(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 disabled:bg-slate-50 disabled:text-slate-500"
+                className={`${FIELD_CLASS} disabled:bg-slate-50 disabled:text-slate-500`}
               />
             </label>
 
@@ -263,7 +295,7 @@ export function TaskDialog({
                 <select
                   value={assigneeId}
                   onChange={(e) => setAssigneeId(e.target.value)}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                  className={FIELD_CLASS}
                 >
                   <option value="">Unassigned</option>
                   {members.map((member) => (
@@ -272,7 +304,7 @@ export function TaskDialog({
                     </option>
                   ))}
                 </select>
-              ) : task.assignee ? (
+              ) : task?.assignee ? (
                 <span className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-[9px] font-semibold text-indigo-700">
                     {initials(task.assignee.name)}
@@ -297,10 +329,10 @@ export function TaskDialog({
                 value={labels}
                 onChange={(e) => setLabels(e.target.value)}
                 placeholder="backend, frontend, bug…"
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                className={FIELD_CLASS}
               />
             </label>
-          ) : task.labels.length > 0 ? (
+          ) : task && task.labels.length > 0 ? (
             <div>
               <span className="mb-1 block text-xs font-medium text-slate-500">Labels</span>
               <div className="flex flex-wrap gap-1">
@@ -320,15 +352,17 @@ export function TaskDialog({
             <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
           ) : null}
 
-          <TaskComments
-            boardId={boardId}
-            taskId={task.id}
-            canEdit={canEdit}
-            refreshKey={commentsRefreshKey}
-          />
+          {task ? (
+            <TaskComments
+              boardId={boardId}
+              taskId={task.id}
+              canEdit={canEdit}
+              refreshKey={commentsRefreshKey}
+            />
+          ) : null}
 
           <div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-4">
-            {canEdit ? (
+            {task && canEdit ? (
               confirmingDelete ? (
                 <span className="flex items-center gap-1.5">
                   <span className="text-xs font-medium text-red-600">
@@ -366,17 +400,23 @@ export function TaskDialog({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100"
+                className="rounded-lg px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100"
               >
                 Cancel
               </button>
               {canEdit ? (
                 <button
                   type="submit"
-                  disabled={busy}
+                  disabled={busy || (task ? false : !title.trim())}
                   className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:opacity-50"
                 >
-                  {busy ? "Saving…" : "Save"}
+                  {busy
+                    ? task
+                      ? "Saving…"
+                      : "Creating…"
+                    : task
+                      ? "Save"
+                      : "Create task"}
                 </button>
               ) : null}
             </div>

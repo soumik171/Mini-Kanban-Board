@@ -20,7 +20,6 @@ import { TaskDialog } from "@/components/task-dialog";
 import {
   ApiError,
   createColumn,
-  createTask,
   deleteColumn,
   getBoard,
   listColumns,
@@ -75,6 +74,7 @@ function BoardContent() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [panel, setPanel] = useState<"activity" | "members" | null>(null);
   const [commentsKey, setCommentsKey] = useState(0);
+  const [addingTask, setAddingTask] = useState<{ columnId: string } | null>(null);
 
   // Refs mirroring state the stream handler needs without re-creating
   // callbacks: which task dialog is open, and whether a local move is in
@@ -137,6 +137,14 @@ function BoardContent() {
     // The board is gone (deleted by its owner); leave for the board list.
     void router.replace("/");
   }, [router]);
+
+  function handleAddTaskOpen(columnId: string) {
+    setAddingTask({ columnId });
+  }
+
+  function handleAddTaskClose() {
+    setAddingTask(null);
+  }
 
   const streamStatus = useBoardStream(boardId ?? null, {
     onEvent: handleStreamEvent,
@@ -255,6 +263,7 @@ function BoardContent() {
           selectedIdRef.current = task.id;
           setSelectedTaskId(task.id);
         }}
+        onAddTaskOpen={handleAddTaskOpen}
       />
 
       {openTask ? (
@@ -272,6 +281,23 @@ function BoardContent() {
             void load();
           }}
           onClose={() => setSelectedTaskId(null)}
+        />
+      ) : null}
+
+      {addingTask ? (
+        <TaskDialog
+          key="new-task"
+          boardId={boardId ?? ""}
+          columnId={addingTask.columnId}
+          task={null}
+          canEdit={canEdit}
+          onCreated={() => {
+            setAddingTask(null);
+            void load();
+          }}
+          onSaved={() => void load()}
+          onDeleted={() => void load()}
+          onClose={handleAddTaskClose}
         />
       ) : null}
 
@@ -306,6 +332,7 @@ function BoardColumnRow({
   onColumnsChange,
   onError,
   onOpenTask,
+  onAddTaskOpen,
 }: {
   boardId: string;
   columns: Column[];
@@ -316,6 +343,7 @@ function BoardColumnRow({
   onColumnsChange(columns: Column[]): void;
   onError(message: string): void;
   onOpenTask(task: Task): void;
+  onAddTaskOpen(columnId: string): void;
 }) {
   const [addingColumn, setAddingColumn] = useState(false);
   const [columnTitle, setColumnTitle] = useState("");
@@ -423,6 +451,7 @@ function BoardColumnRow({
             onChanged={onChanged}
             onError={onError}
             onOpenTask={onOpenTask}
+            onAddTaskOpen={onAddTaskOpen}
           />
         ))}
 
@@ -526,6 +555,7 @@ function ColumnCard({
   onChanged,
   onError,
   onOpenTask,
+  onAddTaskOpen,
 }: {
   boardId: string;
   column: Column;
@@ -539,32 +569,13 @@ function ColumnCard({
   onChanged(): void;
   onError(message: string): void;
   onOpenTask(task: Task): void;
+  onAddTaskOpen(columnId: string): void;
 }) {
-  const [taskTitle, setTaskTitle] = useState("");
   const [busy, setBusy] = useState(false);
-  const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(column.title);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-
-  async function handleAddTask(event: FormEvent) {
-    event.preventDefault();
-    const title = taskTitle.trim();
-    if (!title || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await createTask(boardId, column.id, { title });
-      setTaskTitle("");
-      setAdding(false);
-      onChanged();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not add task");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function handleRename(event: FormEvent) {
     event.preventDefault();
@@ -607,7 +618,7 @@ function ColumnCard({
 
   return (
     <section
-      className={`flex max-h-full w-72 shrink-0 flex-col rounded-xl bg-slate-200/70 ${
+      className={`flex max-h-full w-72 shrink-0 flex-col rounded-xl bg-slate-100/80 ring-1 ring-slate-200/60 ${
         draggingSelf ? "opacity-90" : ""
       }`}
     >
@@ -632,7 +643,7 @@ function ColumnCard({
           </form>
         ) : (
           <>
-            <h3 className="truncate text-sm font-semibold text-slate-700" title={column.title}>
+            <h3 className="truncate text-sm font-semibold text-slate-800" title={column.title}>
               {column.title}
             </h3>
             <span className="text-xs font-medium text-slate-400">{column.tasks.length}</span>
@@ -710,7 +721,7 @@ function ColumnCard({
           }
         }}
       >
-        {column.tasks.length === 0 && !adding ? (
+        {column.tasks.length === 0 ? (
           <p className="px-2 py-4 text-center text-xs text-slate-400">
             {dragging ? "Drop task here" : "No tasks yet"}
           </p>
@@ -773,46 +784,16 @@ function ColumnCard({
           }`}
         />
 
-        {canEdit && adding ? (
-          <form onSubmit={handleAddTask} className="space-y-2 rounded-lg bg-white p-2 shadow-sm">
-            <input
-              type="text"
-              autoFocus
-              value={taskTitle}
-              onChange={(e) => setTaskTitle(e.target.value)}
-              placeholder="Task title…"
-              maxLength={200}
-              className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500"
-            />
-            <div className="flex gap-1.5">
-              <button
-                type="submit"
-                disabled={busy || !taskTitle.trim()}
-                className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50"
-              >
-                Add
-              </button>
-              <button
-                type="button"
-                onClick={() => setAdding(false)}
-                className="rounded-md px-2 py-1 text-xs text-slate-500 hover:bg-slate-100"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        ) : null}
-
-        {canEdit && !adding ? (
+        {canEdit ? (
           <button
             type="button"
-            onClick={() => {
-              setAdding(true);
-              setError(null);
-            }}
-            className="rounded-lg px-2 py-1.5 text-left text-sm text-slate-500 transition hover:bg-slate-300/50 hover:text-indigo-600"
+            onClick={() => onAddTaskOpen(column.id)}
+            className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-sm font-medium text-slate-500 transition hover:bg-indigo-50 hover:text-indigo-600"
           >
-            + Add task
+            <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 shrink-0">
+              <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
+            </svg>
+            Add task
           </button>
         ) : null}
       </div>
@@ -869,6 +850,8 @@ function TaskCard({
   return (
     <article
       draggable={canEdit}
+      role="button"
+      tabIndex={0}
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", task.id);
         e.dataTransfer.effectAllowed = "move";
@@ -878,10 +861,16 @@ function TaskCard({
       onDragOver={onDragOverCard}
       onDrop={onDropCard}
       onClick={onOpen}
-      className={`group rounded-lg bg-white p-3 shadow-sm transition hover:shadow ${
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      className={`group rounded-lg border border-transparent bg-white p-3 shadow-sm outline-none transition duration-150 hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-md focus-visible:border-indigo-300 focus-visible:ring-2 focus-visible:ring-indigo-500/40 ${
         isDragging ? "opacity-40" : ""
       } ${canEdit ? "cursor-grab select-none active:cursor-grabbing" : "cursor-pointer"}`}
-      title="Open task"
+      title={canEdit ? "Open task (drag to move)" : "Open task"}
     >
       <div className="flex items-start justify-between gap-2">
         <h4 className="text-sm font-medium leading-snug text-slate-800">{task.title}</h4>

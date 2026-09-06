@@ -8,9 +8,9 @@ export const ROLE_STYLES: Record<BoardRole, string> = {
 
 export const PRIORITY_STYLES: Record<Priority, string> = {
   LOW: "bg-slate-100 text-slate-600",
-  MEDIUM: "bg-blue-100 text-blue-700",
+  MEDIUM: "bg-indigo-100 text-indigo-700",
   HIGH: "bg-amber-100 text-amber-800",
-  URGENT: "bg-red-100 text-red-700",
+  URGENT: "bg-rose-100 text-rose-800",
 };
 
 export const PRIORITY_ORDER: Priority[] = ["URGENT", "HIGH", "MEDIUM", "LOW"];
