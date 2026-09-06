@@ -59,13 +59,124 @@ The backend dependencies live in `backend/package.json`, and the frontend depend
 
 ### Environment setup
 
-Copy the example environment file in the backend and fill in the values you want for your run. The backend `.env.example` documents the variables the server expects. The critical ones are the database URL, the port, the frontend origin for CORS, and the two JWT secrets.
+Copy the example environment file at the repository root and fill in the values you want for your run. The `.env.example` at the root documents the variables the server and the Compose file expect. The critical ones are the database URL, the port, the frontend origin for CORS, and the two JWT secrets.
 
 For a local development run, the defaults in the code are usable as-is, but in any shared or deployed environment you should set real secrets. The two JWT secrets, `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET`, must be set in production or the server will refuse to start.
 
 The frontend reads `BACKEND_URL` to know where to send API requests in production. In development the Next.js rewrite maps `/api/*` to the backend at `http://localhost:4000`, so the frontend usually does not need a separate backend URL variable while you are working locally.
 
-### Database
+### Running the backend with Docker Compose
+
+The primary deployment deliverable for this project is the `docker-compose.yml` at the repository root, which starts the database and the backend together so a reviewer can run the project locally with minimal setup.
+
+```bash
+git clone https://github.com/soumik171/Mini-Kanban-Board.git
+cd Mini-Kanban-Board
+docker compose up
+```
+
+This starts a Postgres 16 database and the Express API on port 4000. The Compose file defines two services: a Postgres container with a health check and a persistent volume, and the backend API built from `backend/Dockerfile`. The backend depends on the database being healthy before it starts, and it runs `npx prisma migrate deploy` on boot so the schema is applied automatically.
+
+The backend receives its configuration through environment variables — at minimum `DATABASE_URL`, `JWT_ACCESS_SECRET`, and `JWT_REFRESH_SECRET`. The repository includes `.env.example` at the root with sample values and explanations. For a local run with the Compose file, the default values in the code are usable, but in any shared or deployed environment you should set real secrets.
+
+Once the API is running, start the frontend in a second terminal:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open `http://localhost:3000`. The Next.js dev server proxies `/api/*` requests to the backend at `http://localhost:4000`, so the application behaves as a single same-origin app during development.
+
+## Live deployment (optional)
+
+The assessment asks for a `docker-compose.yml` as the primary deployment artifact, which is already in the repository. A live deployed link is optional but included below for convenience, so a reviewer can open the application in a browser without cloning it locally.
+
+The live version runs the frontend and backend on separate platforms, with a managed PostgreSQL database. The repository's `docker-compose.yml` and `backend/Dockerfile` remain the local-run deliverable — the live deploy uses the same code and the same production build, which is `npm run build` followed by `node dist/index.js` in the `backend` directory.
+
+### What is deployed where
+
+- **Frontend** — Vercel (free tier). The Next.js app is built and served by Vercel, giving a public URL.
+- **Backend** — Render (free web service tier). The Express API is built from the `backend` directory and run as a long-lived web service, giving a public API URL.
+- **Database** — Neon (free tier). A managed PostgreSQL database that the backend connects to over the network.
+
+### How the deployed frontend talks to the deployed backend
+
+In production the frontend and backend live on different domains, but the frontend's `next.config.ts` rewrites `/api/*` requests to the backend URL, so the browser sees every API call as same-origin. The backend sets the refresh cookie without a domain restriction, so the browser stores it for the frontend's domain and sends it back on subsequent requests through the rewrite. The backend's CORS is configured to allow only the frontend's origin.
+
+The result is that authentication works in the deployed version the same way it does locally: the access token lives in memory in the frontend, and the refresh token is an HttpOnly cookie that the browser sends through the rewrite on `/api/auth/refresh`.
+
+### Step-by-step: deploy the live version
+
+#### 1. Create the database on Neon
+
+Create a free Neon Postgres project at https://neon.tech. From the project dashboard, copy the connection string — it looks like `postgresql://user:password@host.neon.tech/dbname?sslmode=require`. Set this aside as `DATABASE_URL`.
+
+#### 2. Deploy the backend on Render
+
+Create a new Web Service on https://render.com and connect the GitHub repository. Configure it as follows:
+
+- **Name:** choose any name (for example `mini-kanban-api`).
+- **Root Directory:** `backend` — this tells Render to build and run from the `backend` directory.
+- **Environment:** `Node`.
+- **Build Command:** `npm run build && npx prisma migrate deploy`.
+- **Start Command:** `node dist/index.js`.
+- **Plan:** Free.
+
+Set the following environment variables in Render's dashboard (these are the production equivalents of `.env.example`):
+
+- `DATABASE_URL` — the Neon connection string from step 1.
+- `JWT_ACCESS_SECRET` — a random secret (for example, run `openssl rand -hex 32` or use Render's built-in generator).
+- `JWT_REFRESH_SECRET` — a different random secret (must be distinct from the access secret).
+- `CLIENT_ORIGIN` — the live frontend URL from step 3 (for example `https://your-project.vercel.app`), or leave it empty until the frontend is live and then update it.
+- `NODE_ENV` — `production`.
+
+Render runs `npm install`, then the build command, then the start command. On the first boot it applies the Prisma migration to the Neon database. The API becomes available at `https://your-service-name.onrender.com`.
+
+#### 3. Deploy the frontend on Vercel
+
+Create a new project on https://vercel.com and import the same GitHub repository. Vercel detects the Next.js app in the `frontend` directory automatically. Configure it as follows:
+
+- **Root Directory:** `frontend` — if Vercel does not detect it automatically, set it explicitly.
+- **Framework Preset:** `Next.js`.
+- **Build Command:** leave the default (`npm run build`).
+- **Output Directory:** leave the default (`.next`).
+- **Plan:** Free.
+
+Set the following environment variable in Vercel's dashboard:
+
+- `BACKEND_URL` — the live backend URL from step 2 (for example `https://mini-kanban-api.onrender.com`). Do not include a trailing slash.
+
+Vercel builds the frontend and serves it at `https://your-project-name.vercel.app`. The `next.config.ts` rewrite uses `BACKEND_URL` to proxy `/api/*` requests to the Render backend.
+
+#### 4. Wire the backend to the frontend's origin
+
+Once the frontend URL from step 3 is known, update the backend's `CLIENT_ORIGIN` environment variable on Render to the Vercel URL (for example `https://your-project-name.vercel.app`). This allows the deployed frontend to make credentialed API calls. If you set `CLIENT_ORIGIN` before deploying the frontend, you can use the Vercel preview URL or the final production URL — update it after the frontend is live if needed.
+
+#### 5. Seed the deployed database
+
+The deployed database starts empty. Seed it once so the live link shows the demo board:
+
+```bash
+cd backend
+# Point DATABASE_URL at the Neon database, then:npm run db:seed
+```
+
+You can run this from your local machine with the Neon `DATABASE_URL`, or from Render's dashboard if a one-off command is available. The seed is idempotent, so running it again is safe.
+
+#### 6. Test the live link
+
+Open the Vercel frontend URL in a browser. You should see the board list. Log in with `demo@test.com` and `demo-password-1` to access the seeded "Demo Kanban" board. Create a new board, invite a teammate, drag tasks between columns, add comments, and open the activity feed and members panel to confirm the full application works live.
+
+### A note on the live update stream
+
+The real-time SSE stream works through the same `/api/auth/stream` rewrite as the rest of the API. On the free tiers, the backend may sleep after a period of inactivity and wake on the next request, which adds a brief delay to the first request after idle. The stream itself may also experience occasional delays from the platform's proxy. The core application — authentication, boards, columns, tasks, drag-and-drop, comments, members, and the activity feed — works regardless; live updates are a bonus when the backend is warm.
+
+### Local development vs. live deployment
+
+You do not need to deploy to use the project. The intended day-to-day development flow is Docker Compose for the backend plus `npm run dev` for the frontend, as described above. The live deploy is a showcase path that reuses the same code, the same build, and the same database schema.
+
+## Repository structure
 
 The fastest way to get a database running locally is Docker Compose, which starts PostgreSQL and the backend together:
 
@@ -215,7 +326,7 @@ For a fully self-contained deployment, the remaining work is to add a frontend s
 │   ├── next.config.ts     # dev-server API proxy
 │   └── package.json
 ├── docker-compose.yml     # Postgres + API services
-├── .env.example           # sample backend environment
+├── .env.example           # sample environment variables
 └── README.md
 ```
 
